@@ -1,0 +1,48 @@
+# Caddyfile.txt (v3) - pintu depan Indrajala: website dummy (Zona Kuning) + portal/unduhan/canary/terminal (n8n).
+# Jalankan: caddy run --config Caddyfile.txt --adapter caddyfile
+
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	# ciri server palsu (menyamarkan Caddy, n8n, dan Node)
+	header Server "Apache/2.4.52 (Ubuntu)"
+	header X-Powered-By "PHP/8.1.2"
+
+	# portal berkas (halaman daftar) -> n8n
+	handle /portal {
+		rewrite * /webhook/indrajala-portal
+		reverse_proxy 127.0.0.1:5678
+	}
+
+	# unduhan berkas umpan -> n8n
+	handle /portal/unduh {
+		rewrite * /webhook/indrajala-unduh
+		reverse_proxy 127.0.0.1:5678
+	}
+
+	# tautan canary di dalam PDF -> n8n
+	handle /portal/lampiran {
+		rewrite * /webhook/indrajala-canary
+		reverse_proxy 127.0.0.1:5678
+	}
+
+	# terminal palsu -> n8n
+	handle /api/terminal {
+		rewrite * /webhook/indrajala
+		reverse_proxy 127.0.0.1:5678
+	}
+
+	# selain itu: website dummy (Zona Kuning, Node di 127.0.0.1:8081)
+	handle {
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	# catatan akses (termasuk IP asal) yang berdiri sendiri, tidak tergantung n8n
+	log {
+		output file akses.log
+		format json
+	}
+}

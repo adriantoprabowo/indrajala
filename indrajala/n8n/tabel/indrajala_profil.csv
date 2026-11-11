@@ -1,0 +1,44 @@
+server,kunci,nilai
+global,VERSI_PROFIL,20
+global,PASSWORD_BKP,Bk#4rTz9Vn
+global,IP_BKP,10.20.4.20
+global,BOOT,2026-10-20T08:15:00Z
+global,PORTAL_HOST,localhost:8080
+app,hostname,fileserv-02
+app,user,deploy
+app,uid,1001
+app,groups,1001(deploy)
+app,home,/home/deploy
+app,kernelVer,5.15.0-91-generic
+app,osName,Ubuntu 22.04
+app,loginInfo,pts/0        2026-10-29 09:12 (10.20.4.17)
+app,UMUM,/bin|/boot|/dev|/opt|/usr|/proc|/sys|/lib|/sbin|/mnt|/srv|/run
+app,DENIED,/etc/shadow|/root|/var/log/auth.log|/var/log/syslog|/var/log/nginx/access.log|/var/log/nginx/error.log
+app,MILIK,/home/deploy|/var/www/html
+app,mem_total,3924
+app,mem_used,1102
+app,mem_free,812
+app,mem_shared,14
+app,mem_cache,2010
+app,mem_avail,2538
+app,mem_swap,2047
+bkp,hostname,bkp-01
+bkp,user,backup
+bkp,uid,34
+bkp,groups,34(backup)
+bkp,home,/home/backup
+bkp,kernelVer,5.4.0-169-generic
+bkp,osName,Ubuntu 20.04
+bkp,loginInfo,pts/0        {TGL} {HM} (10.20.4.12)
+bkp,UMUM,/bin|/boot|/dev|/opt|/usr|/proc|/sys|/lib|/sbin|/mnt|/run
+bkp,DENIED,/etc/shadow|/root|/var/log/auth.log|/var/log/syslog
+bkp,MILIK,/home/backup|/srv/backup
+bkp,mem_total,1963
+bkp,mem_used,421
+bkp,mem_free,311
+bkp,mem_shared,2
+bkp,mem_cache,1230
+bkp,mem_avail,1380
+bkp,mem_swap,2047
+bkp,banner,Welcome to Ubuntu 20.04.6 LTS (GNU/Linux 5.4.0-169-generic x86_64)\n\n * Documentation:  https://help.ubuntu.com\n * Management:     https://landscape.canonical.com\n * Support:        https://ubuntu.com/advantage\n\nLast login: Sun Oct 25 02:00:07 2026 from 10.20.4.12
+bkp,prompt_sidik,The authenticity of host '10.20.4.20 (10.20.4.20)' can't be established.\nED25519 key fingerprint is SHA256:Qm2kP9xT3vYw7LdE1uZ0aBn5HcR8sFgJ4oVtXyW6iNk.\nThis key is not known by any other names\nAre you sure you want to continue connecting (yes/no/[fingerprint])? 

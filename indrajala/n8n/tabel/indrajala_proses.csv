@@ -1,0 +1,30 @@
+server,urut,pemilik,pid,ppid,cpu,memori,vsz,rss,tty,stat,mulai,waktu,perintah
+app,1,root,1,0,0.0,0.3,168500,11976,?,Ss,Oct20,0:08,/sbin/init
+app,2,root,2,0,0.0,0.0,0,0,?,S,Oct20,0:00,[kthreadd]
+app,3,root,355,1,0.0,0.9,52964,35840,?,S<s,Oct20,0:11,/lib/systemd/systemd-journald
+app,4,root,401,1,0.0,0.1,26580,6144,?,Ss,Oct20,0:00,/lib/systemd/systemd-udevd
+app,5,systemd+,612,1,0.0,0.2,25528,8320,?,Ss,Oct20,0:02,/lib/systemd/systemd-resolved
+app,6,systemd+,614,1,0.0,0.1,89364,6272,?,Ssl,Oct20,0:00,/lib/systemd/systemd-timesyncd
+app,7,root,705,1,0.0,0.1,15464,5632,?,Ss,Oct20,0:00,/usr/sbin/cron -f -P
+app,8,message+,707,1,0.0,0.1,8700,4864,?,Ss,Oct20,0:01,@dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+app,9,root,716,1,0.0,0.2,232692,7424,?,Ssl,Oct20,0:00,/usr/sbin/rsyslogd -n -iNONE
+app,10,root,723,1,0.0,0.1,15336,7552,?,Ss,Oct20,0:00,/lib/systemd/systemd-logind
+app,11,root,801,1,0.0,0.1,15432,5760,?,Ss,Oct20,0:00,sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+app,12,root,833,1,0.0,0.1,55284,4608,?,Ss,Oct20,0:00,nginx: master process /usr/sbin/nginx -g daemon on; master_process on;
+app,13,www-data,834,833,0.0,0.2,55960,8320,?,S,Oct20,0:03,nginx: worker process
+app,14,www-data,835,833,0.0,0.2,55960,8192,?,S,Oct20,0:02,nginx: worker process
+app,15,root,840,1,0.0,1.1,266772,44032,?,Ss,Oct20,0:05,php-fpm: master process (/etc/php/8.1/fpm/php-fpm.conf)
+app,16,www-data,871,840,0.0,0.6,267300,24320,?,S,Oct20,0:02,php-fpm: pool www
+app,17,root,2381,801,0.0,0.2,17112,9472,?,Ss,09:12,0:00,sshd: deploy [priv]
+app,18,deploy,2398,2381,0.0,0.1,17244,6528,?,S,09:12,0:00,sshd: deploy@pts/0
+bkp,1,root,1,0,0.0,0.4,168240,11720,?,Ss,Oct20,0:07,/sbin/init
+bkp,2,root,2,0,0.0,0.0,0,0,?,S,Oct20,0:00,[kthreadd]
+bkp,3,root,312,1,0.0,1.6,60324,33104,?,S<s,Oct20,0:10,/lib/systemd/systemd-journald
+bkp,4,root,344,1,0.0,0.3,21740,6080,?,Ss,Oct20,0:00,/lib/systemd/systemd-udevd
+bkp,5,systemd+,601,1,0.0,0.3,23952,6944,?,Ss,Oct20,0:02,/lib/systemd/systemd-resolved
+bkp,6,root,688,1,0.0,0.3,31144,7064,?,Ss,Oct20,0:00,/usr/sbin/cron -f
+bkp,7,syslog,690,1,0.0,0.3,224344,5120,?,Ssl,Oct20,0:00,/usr/sbin/rsyslogd -n -iNONE
+bkp,8,root,701,1,0.0,0.3,16792,7140,?,Ss,Oct20,0:00,/lib/systemd/systemd-logind
+bkp,9,root,775,1,0.0,0.4,12176,7596,?,Ss,Oct20,0:00,sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+bkp,10,root,2381,775,0.0,0.4,13900,8740,?,Ss,{HM},0:00,sshd: backup [priv]
+bkp,11,backup,2398,2381,0.0,0.3,14052,6008,?,S,{HM},0:00,sshd: backup@pts/0

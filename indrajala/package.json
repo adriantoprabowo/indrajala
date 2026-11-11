@@ -1,0 +1,12 @@
+{
+  "name": "indrajala",
+  "version": "1.0.0",
+  "description": "Indrajala: honeypot defensif berlapis (terminal palsu, website dummy, dokumen umpan berlacak) untuk Cyber Range. Purwarupa Kartika Cyber Hackathon 2026.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "node tests/uji_terminal_state.js && node tests/uji_website.js && node tests/uji_umpan.js",
+    "website": "node zona-kuning/zona_kuning.js"
+  },
+  "engines": { "node": ">=18" }
+}

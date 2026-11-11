@@ -1,0 +1,1725 @@
+{
+  "name": "Indrajala Honeypot",
+  "nodes": [
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Siapkan Memori').first().json.payload) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1344,
+        0
+      ],
+      "id": "984c3215-c9e1-44b4-9beb-ed012cfc8c64",
+      "name": "HTTP Request",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $('Simpan Memori').first().json.reply }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2464,
+        0
+      ],
+      "id": "4666566c-b179-4e40-b346-05f56cfa4795",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\n\n// =====================================================================\n// 1. BACA DATA DARI DATA TABLE\n//    (diisi oleh 4 kotak \"Ambil ...\" sebelum kotak ini. Edit datanya di tab Data Tables.)\n// =====================================================================\nconst ambil = (nama) => $(nama).all().map((i) => i.json);\nconst T_PROFIL = ambil('Ambil Profil');\nconst T_BERKAS = ambil('Ambil Berkas');\nconst T_PROSES = ambil('Ambil Proses');\nconst T_JAWABAN = ambil('Ambil Jawaban');\n\nconst unesc = (s) => String(s ?? '').replace(/\\\\n/g, '\\n').replace(/\\\\t/g, '\\t');\nconst daftar = (s) => String(s ?? '').split('|').map((x) => x.trim()).filter(Boolean);\nconst HM = new Date().toISOString().slice(11, 16);\nconst TGL = new Date().toISOString().slice(0, 10);\nconst isiTpl = (s) => String(s ?? '').replace(/\\{HM\\}/g, HM).replace(/\\{TGL\\}/g, TGL);\n\nconst CFG = {};\nfor (const r of T_PROFIL) if (r.server === 'global') CFG[r.kunci] = String(r.nilai ?? '');\nconst VERSI_PROFIL = CFG.VERSI_PROFIL || '1';\nconst PASSWORD_BKP = CFG.PASSWORD_BKP;\nconst IP_BKP = CFG.IP_BKP;\nconst BOOT = CFG.BOOT;\nconst isiDinamis = (s) => String(s)\n  .replace(/\\{SESSION\\}/g, encodeURIComponent(session))\n  .replace(/\\{PORTAL\\}/g, CFG.PORTAL_HOST || 'localhost:5678');\n\nfunction bangunProfil(h) {\n  const p = {};\n  for (const r of T_PROFIL) if (r.server === h) p[r.kunci] = isiTpl(r.nilai);\n  const fs = {};\n  for (const r of T_BERKAS) {\n    if (r.server !== h) continue;\n    fs[String(r.lokasi)] = r.tipe === 'dir' ? daftar(r.isi) : unesc(r.isi);\n  }\n  const proses = T_PROSES.filter((r) => r.server === h)\n    .sort((a, b) => Number(a.urut) - Number(b.urut))\n    .map((r) => [String(r.pemilik), Number(r.pid), Number(r.ppid), Number(r.cpu), Number(r.memori),\n      Number(r.vsz), Number(r.rss), String(r.tty), String(r.stat), isiTpl(r.mulai), String(r.waktu), String(r.perintah)]);\n  const mentah = {};\n  for (const r of T_JAWABAN) if (r.server === h) mentah[String(r.perintah)] = unesc(r.isi);\n  const jawaban = {};\n  for (const [k, v] of Object.entries(mentah)) jawaban[k] = v.startsWith('ALIAS:') ? (mentah[v.slice(6)] ?? '') : v;\n  return {\n    server: {\n      hostname: p.hostname, user: p.user, uid: Number(p.uid), groups: p.groups, home: p.home,\n      kernelVer: p.kernelVer, osName: p.osName, loginInfo: p.loginInfo\n    },\n    mem: {\n      total: Number(p.mem_total), used: Number(p.mem_used), free: Number(p.mem_free), shared: Number(p.mem_shared),\n      cache: Number(p.mem_cache), avail: Number(p.mem_avail), swap: Number(p.mem_swap)\n    },\n    banner: unesc(p.banner), promptSidik: unesc(p.prompt_sidik),\n    fs, proses, jawaban, umum: daftar(p.UMUM), denied: daftar(p.DENIED), milik: daftar(p.MILIK)\n  };\n}\nconst PROFIL = { app: bangunProfil('app'), bkp: bangunProfil('bkp') };\n\nlet AKTIF, SERVER, FS, PROSES, UMUM, DENIED, MILIK, MEM, JAWABAN_TETAP;\nfunction pakai(P) {\n  AKTIF = P; SERVER = P.server; FS = P.fs; PROSES = P.proses;\n  UMUM = P.umum; DENIED = P.denied; MILIK = P.milik; MEM = P.mem; JAWABAN_TETAP = P.jawaban;\n}\n\n// =====================================================================\n// 2. SESI DAN STATUS PENYUSUP\n// =====================================================================\n// State sesi dibaca dari tabel indrajala_state (kotak \"Ambil State\") dan ditulis kembali oleh kotak \"Simpan State\".\n// Dengan begitu dua sesi berbeda tidak lagi saling menimpa.\nconst hash = (s) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };\n\nconst masuk = $('Webhook').first().json;\nconst sekarang = Date.now();\n// Nama sesi: dibersihkan; bila kosong, diturunkan dari sidik klien (UA + header IP bila ada), bukan \"default\" bersama.\nconst hdr = masuk.headers || {};\nlet session = String((masuk.body || {}).session || '').replace(/[^\\w.\\-]/g, '').slice(0, 40);\nif (!session) session = 'anon-' + hash(String(hdr['user-agent'] || '') + String(hdr['x-forwarded-for'] || hdr['x-real-ip'] || '')).toString(36);\nif (session.startsWith('_') || ['__proto__', 'constructor', 'prototype'].includes(session)) session = 'x' + session;   // nama berawalan _ dicadangkan untuk baris sistem (_seed, _hermes)\nconst semuaState = $('Ambil State').all().map((i) => i.json);\nconst command = String((masuk.body || {}).command || '').slice(0, 500);\n\nconst kosong = (x) => (x === undefined || x === null || x === '' || x === '-' ? '' : String(x));\nconst barisState = semuaState.find((r) => r && r.session === session && String(r.versi) === VERSI_PROFIL);   // versi lain = dianggap sesi baru\nlet tersimpan = {};\nif (barisState) { try { tersimpan = JSON.parse(barisState.data) || {}; } catch { tersimpan = {}; } }\nconst adaObjek = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? o : null);\n\nconst state = {\n  cwd: kosong(tersimpan.cwd) || PROFIL.app.server.home,\n  host: kosong(tersimpan.host) || null,\n  mode: kosong(tersimpan.mode) || null,\n  target: adaObjek(tersimpan.target),\n  tries: Number(tersimpan.tries) || 0,\n  knownBkp: !!tersimpan.knownBkp,\n  pila: adaObjek(tersimpan.pila),\n  pid: Number(tersimpan.pid) || 0,\n  hermesTerakhir: Number(tersimpan.hermesTerakhir) || 0,\n  rl: adaObjek(tersimpan.rl)\n};\nlet history = (Array.isArray(tersimpan.history) ? tersimpan.history : [])\n  .filter((m) => m && typeof m.content === 'string' && (m.role === 'user' || m.role === 'assistant')).slice(-8);\n\n// Bungkus state untuk disimpan: satu baris per sesi (kolom: session, versi, data, updated).\nfunction bungkus() {\n  const data = {\n    cwd: state.cwd, host: state.host || '', mode: state.mode || '', target: state.target, tries: state.tries,\n    knownBkp: state.knownBkp, pila: state.pila, pid: state.pid, hermesTerakhir: state.hermesTerakhir, rl: state.rl, history\n  };\n  return { session, versi: VERSI_PROFIL, data: JSON.stringify(data), updated: Date.now() };\n}\nconst keluar = (obj) => [{ json: { session, command, ...obj, stateBaru: bungkus() } }];\n\npakai(state.host === 'bkp' ? PROFIL.bkp : PROFIL.app);\n\n// ---- batas laju: global dan per sesi (jendela 10 detik) ----\nif (!staticData.rl || sekarang - staticData.rl.t0 > 10000) staticData.rl = { t0: sekarang, n: 0 };\nstaticData.rl.n += 1;\nif (!state.rl || sekarang - state.rl.t0 > 10000) state.rl = { t0: sekarang, n: 0 };\nstate.rl.n += 1;\nif (staticData.rl.n > 80 || state.rl.n > 15) {\n  const pertama = staticData.rl.n === 81 || state.rl.n === 16;\n  return keluar({ perlu_llm: false, banjir: true, banjirTanda: pertama, reply: '-bash: fork: retry: Resource temporarily unavailable' });\n}\n\n// =====================================================================\n// 3. ALAT BANTU FILESYSTEM PALSU\n// =====================================================================\nconst dirname = (p) => p.substring(0, p.lastIndexOf('/')) || '/';\nconst basename = (p) => p.substring(p.lastIndexOf('/') + 1);\nconst join = (d, n) => (d === '/' ? '' : d) + '/' + n;\n\nfunction resolve(cwd, p) {\n  if (!p || p === '~') return SERVER.home;\n  if (p.startsWith('~/')) p = SERVER.home + p.slice(1);\n  const parts = (p.startsWith('/') ? p : cwd + '/' + p).split('/');\n  const out = [];\n  for (const s of parts) {\n    if (!s || s === '.') continue;\n    if (s === '..') out.pop(); else out.push(s);\n  }\n  return '/' + out.join('/');\n}\n\nconst isDir = (p) => Array.isArray(FS[p]) || UMUM.includes(p) || p === '/';\nconst isFile = (p) => {\n  const induk = FS[dirname(p)];\n  return Array.isArray(induk) && induk.includes(basename(p)) && !isDir(p);\n};\nconst exists = (p) => isDir(p) || isFile(p) || DENIED.includes(p);\n\nfunction baris(dir, n) {\n  const p = n === '.' ? dir : n === '..' ? dirname(dir) : join(dir, n);\n  const folder = n === '.' || n === '..' || isDir(p);\n  const pemilik = MILIK.some((pre) => dir.startsWith(pre)) ? SERVER.user : 'root';\n  const h = hash(p);\n  const ukuran = folder ? 4096 : (typeof FS[p] === 'string' ? FS[p].length : 1024 + (h % 900000));\n  let bulan = ['Sep', 'Oct'][h % 2];\n  let hari = String(1 + ((h >>> 3) % 25)).padStart(2, ' ');\n  let jam = String(h % 24).padStart(2, '0') + ':' + String((h >>> 5) % 60).padStart(2, '0');\n  const tgl = n.match(/(\\d{4})-(\\d{2})-(\\d{2})/); // nama berkas bertanggal -> pakai tanggal itu\n  if (tgl) {\n    bulan = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(tgl[2]) - 1];\n    hari = String(Number(tgl[3])).padStart(2, ' ');\n    jam = '02:00';\n  }\n  const mode = folder ? 'drwxr-xr-x' : (n.startsWith('.') ? '-rw-------' : '-rw-r--r--');\n  return `${mode} ${folder ? 2 : 1} ${pemilik.padEnd(5)} ${pemilik.padEnd(5)} ${String(ukuran).padStart(6)} ${bulan} ${hari} ${jam} ${n}`;\n}\n\nfunction lsCmd(args) {\n  let flags = '';\n  const paths = [];\n  for (const a of args) { if (a.startsWith('-')) flags += a.slice(1); else paths.push(a); }\n  const panjang = flags.includes('l');\n  const semua = flags.includes('a');\n  const target = paths[0] === undefined ? state.cwd : resolve(state.cwd, paths[0]);\n  const tampil = paths[0] || target;\n  if (DENIED.includes(target)) return `ls: cannot open directory '${tampil}': Permission denied`;\n  if (!exists(target)) return `ls: cannot access '${tampil}': No such file or directory`;\n  if (isFile(target)) return panjang ? baris(dirname(target), basename(target)) : tampil;\n  if (!Array.isArray(FS[target])) return null; // folder umum -> serahkan ke Hermes\n  let nama = FS[target].slice().sort((a, b) => a.localeCompare(b));\n  if (!semua) nama = nama.filter((n) => !n.startsWith('.'));\n  else nama = ['.', '..', ...nama];\n  if (!panjang) return nama.join(state.grepPola ? '\\n' : '  ');\n  return 'total ' + nama.length * 4 + '\\n' + nama.map((n) => baris(target, n)).join('\\n');\n}\n\n// =====================================================================\n// 4. JAWABAN LANGSUNG TANPA AI\n// =====================================================================\nfunction jawab(cmdLine) {\n  const parts = cmdLine.trim().split(/\\s+/).filter(Boolean);\n  if (parts.length === 0) return '';\n  const cmd = parts[0];\n  const args = parts.slice(1);\n  const bukanFlag = args.filter((a) => !a.startsWith('-'));\n  const flag = args.filter((a) => a.startsWith('-')).join('');\n\n  // jawaban tetap dari tabel \"indrajala_jawaban\"\n  const kunci = cmdLine.trim().replace(/\\s+/g, ' ');\n  if (JAWABAN_TETAP[kunci] !== undefined) return JAWABAN_TETAP[kunci];\n\n  const pad2 = (n) => String(n).padStart(2, '0');\n  const kini = new Date();\n  const jamKini = `${pad2(kini.getUTCHours())}:${pad2(kini.getUTCMinutes())}:${pad2(kini.getUTCSeconds())}`;\n  const rnd = () => Math.floor(Math.random() * 9);\n  const beban = `0.0${rnd()}, 0.0${rnd()}, 0.0${rnd()}`;\n  const ms = Date.now() - Date.parse(BOOT);\n  const hariUp = Math.floor(ms / 86400000);\n  const jamUp = Math.floor((ms % 86400000) / 3600000);\n  const menitUp = Math.floor((ms % 3600000) / 60000);\n  const lamaUp = (hariUp > 0 ? `${hariUp} day${hariUp > 1 ? 's' : ''}, ` : '') + `${String(jamUp).padStart(2, ' ')}:${pad2(menitUp)}`;\n  const loginHM = (SERVER.loginInfo.match(/(\\d\\d:\\d\\d)/) || [])[1] || '09:12';\n\n  const paketTidakAda = { ifconfig: 'net-tools', netstat: 'net-tools', mysql: 'mysql-client-core-8.0', nmap: 'nmap', telnet: 'telnet' };\n  if (paketTidakAda[cmd]) {\n    return `Command '${cmd}' not found, but can be installed with:\\n\\nsudo apt install ${paketTidakAda[cmd]}\\nPlease ask your administrator.`;\n  }\n\n  if (cmd === 'ssh') {\n    const t = bukanFlag[0] || '';\n    if (!t) return null;\n    const bkp = t === 'bkp';\n    const user = bkp ? 'backup' : (t.includes('@') ? t.split('@')[0] : SERVER.user);\n    const host = bkp ? IP_BKP : (t.includes('@') ? t.split('@')[1] : t);\n    return `${user}@${host}: Permission denied (publickey,password).`;\n  }\n\n  if (cmd === 'uptime') return ` ${jamKini} up ${lamaUp},  1 user,  load average: ${beban}`;\n\n  if (cmd === 'w') {\n    const dari = (SERVER.loginInfo.match(/\\((.*?)\\)/) || [])[1] || '10.0.0.1';\n    return ` ${jamKini} up ${lamaUp},  1 user,  load average: ${beban}\\n` +\n      'USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT\\n' +\n      `${SERVER.user.padEnd(8)} pts/0    ${dari.padEnd(16)} ${loginHM}    0.00s  0.03s  0.00s w`;\n  }\n\n  if (cmd === 'date') {\n    const H = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];\n    const B = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];\n    return `${H[kini.getUTCDay()]} ${B[kini.getUTCMonth()]} ${String(kini.getUTCDate()).padStart(2, ' ')} ${jamKini} UTC ${kini.getUTCFullYear()}`;\n  }\n\n  if (cmd === 'free') {\n    const h = flag.includes('h');\n    const m = flag.includes('m');\n    const fmt = (v) => {\n      if (h) return v === 0 ? '0B' : v >= 1024 ? (v / 1024).toFixed(1) + 'Gi' : v + 'Mi';\n      return String(m ? v : v * 1024);\n    };\n    const kolom = (label, vals) => label.padEnd(8) + vals.map((v) => String(v).padStart(12)).join('');\n    return [\n      kolom('', ['total', 'used', 'free', 'shared', 'buff/cache', 'available']),\n      kolom('Mem:', [MEM.total, MEM.used, MEM.free, MEM.shared, MEM.cache, MEM.avail].map(fmt)),\n      kolom('Swap:', [MEM.swap, 0, MEM.swap].map(fmt))\n    ].join('\\n');\n  }\n\n  if (cmd === 'history') {\n    const f = FS[join(SERVER.home, '.bash_history')];\n    const isi = typeof f === 'string' ? f.split('\\n') : [];\n    return [...isi, 'history'].map((l, i) => String(i + 1).padStart(5) + '  ' + l).join('\\n');\n  }\n\n  if (cmd === 'ps') {\n    const semuaBsd = args.length > 0 && args.every((a) => /^-?a[ux]{1,2}w*$/.test(a));\n    const modeEf = args.includes('-ef');\n    const polos = args.length === 0;\n    if (!semuaBsd && !modeEf && !polos) return null; // opsi aneh -> Hermes\n\n    if (!state.pid) state.pid = 2420 + (hash(session) % 50);\n    state.pid += 3 + Math.floor(Math.random() * 6);\n    const pidPs = state.pid;\n    const mulai = jamKini.slice(0, 5);\n\n    if (polos) {\n      const k = (p, t, n) => String(p).padStart(7) + ' ' + t.padEnd(8) + ' ' + '00:00:00'.padStart(8) + ' ' + n;\n      const br = ['PID'.padStart(7) + ' ' + 'TTY'.padEnd(8) + ' ' + 'TIME'.padStart(8) + ' CMD', k(2399, 'pts/0', 'bash'), k(pidPs, 'pts/0', 'ps')];\n      if (state.grepPola) br.push(k(pidPs + 1, 'pts/0', 'grep'));\n      return br.join('\\n');\n    }\n\n    const semua = [\n      ...PROSES,\n      [SERVER.user, 2399, 2398, 0.0, 0.1, 9984, 5376, 'pts/0', 'Ss', loginHM, '0:00', '-bash'],\n      [SERVER.user, pidPs, 2399, 0.0, 0.1, 10156, 3456, 'pts/0', 'R+', mulai, '0:00', ('ps ' + args.join(' ')).trim()]\n    ];\n    if (state.grepPola) {\n      semua.push([SERVER.user, pidPs + 1, 2399, 0.0, 0.0, 9032, 2432, 'pts/0', 'S+', mulai, '0:00', 'grep --color=auto ' + state.grepPola]);\n    }\n\n    if (modeEf) {\n      const t8 = (t) => { const [mm, ss] = t.split(':'); return '00:' + pad2(mm) + ':' + ss; };\n      const kepala = 'UID'.padEnd(8) + ' ' + 'PID'.padStart(7) + ' ' + 'PPID'.padStart(7) + '  C STIME ' + 'TTY'.padEnd(8) + ' ' + 'TIME'.padStart(8) + ' CMD';\n      return [kepala, ...semua.map((r) =>\n        String(r[0]).padEnd(8) + ' ' + String(r[1]).padStart(7) + ' ' + String(r[2]).padStart(7) + '  0 ' + String(r[9]).padEnd(5) + ' ' + String(r[7]).padEnd(8) + ' ' + t8(r[10]) + ' ' + r[11]\n      )].join('\\n');\n    }\n\n    const kepalaAux = 'USER'.padEnd(8) + ' ' + 'PID'.padStart(7) + ' ' + '%CPU'.padStart(4) + ' ' + '%MEM'.padStart(4) + ' ' + 'VSZ'.padStart(6) + ' ' + 'RSS'.padStart(5) + ' ' + 'TTY'.padEnd(8) + ' ' + 'STAT'.padEnd(4) + ' ' + 'START'.padEnd(5) + ' ' + 'TIME'.padStart(6) + ' COMMAND';\n    return [kepalaAux, ...semua.map((r) =>\n      String(r[0]).padEnd(8) + ' ' + String(r[1]).padStart(7) + ' ' + r[3].toFixed(1).padStart(4) + ' ' + r[4].toFixed(1).padStart(4) + ' ' + String(r[5]).padStart(6) + ' ' + String(r[6]).padStart(5) + ' ' + String(r[7]).padEnd(8) + ' ' + String(r[8]).padEnd(4) + ' ' + String(r[9]).padEnd(5) + ' ' + String(r[10]).padStart(6) + ' ' + r[11]\n    )].join('\\n');\n  }\n\n  switch (cmd) {\n    case 'whoami': return SERVER.user;\n    case 'who': return `${SERVER.user}     ${SERVER.loginInfo}`;\n    case 'id': return `uid=${SERVER.uid}(${SERVER.user}) gid=${SERVER.uid}(${SERVER.user}) groups=${SERVER.groups}`;\n    case 'hostname': return SERVER.hostname;\n    case 'pwd': return state.cwd;\n    case 'echo': return args.join(' ');\n    case 'uname':\n      if (flag.includes('a')) return `Linux ${SERVER.hostname} ${SERVER.kernelVer} #101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux`;\n      if (flag.includes('r')) return SERVER.kernelVer;\n      if (flag.includes('n')) return SERVER.hostname;\n      return 'Linux';\n    case 'cd': {\n      const target = resolve(state.cwd, args[0]);\n      if (DENIED.includes(target)) return `bash: cd: ${args[0]}: Permission denied`;\n      if (!exists(target)) return `bash: cd: ${args[0]}: No such file or directory`;\n      if (isFile(target)) return `bash: cd: ${args[0]}: Not a directory`;\n      state.cwd = target;\n      return '';\n    }\n    case 'ls': return lsCmd(args);\n    case 'cat': {\n      if (bukanFlag.length === 0) return '';\n      return bukanFlag.map((a) => {\n        const p = resolve(state.cwd, a);\n        if (DENIED.includes(p)) return `cat: ${a}: Permission denied`;\n        if (!exists(p)) return `cat: ${a}: No such file or directory`;\n        if (isDir(p)) return `cat: ${a}: Is a directory`;\n        return typeof FS[p] === 'string' ? isiDinamis(FS[p]) : '';\n      }).join('\\n');\n    }\n    case 'sudo': return 'sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper';\n    case 'rm':\n      if (/r/.test(flag) && ['/', '/*'].includes(bukanFlag[0])) return \"rm: it is dangerous to operate recursively on '/'\\nrm: use --no-preserve-root to override this safety\";\n      return `rm: cannot remove '${bukanFlag[0] || ''}': Permission denied`;\n    case 'mkdir': return `mkdir: cannot create directory '${bukanFlag[0] || ''}': Permission denied`;\n    case 'touch': return `touch: cannot touch '${bukanFlag[0] || ''}': Permission denied`;\n    case 'mv': return `mv: cannot move '${bukanFlag[0] || ''}' to '${bukanFlag[1] || ''}': Permission denied`;\n    case 'chmod': return `chmod: changing permissions of '${bukanFlag[bukanFlag.length - 1] || ''}': Operation not permitted`;\n    case 'chown': return `chown: changing ownership of '${bukanFlag[bukanFlag.length - 1] || ''}': Operation not permitted`;\n    case 'curl':\n    case 'wget': {\n      const url = bukanFlag.find((a) => /^https?:\\/\\//.test(a) || a.includes('.')) || '';\n      const host = url.replace(/^https?:\\/\\//, '').split(/[\\/:]/)[0] || 'host';\n      return cmd === 'curl' ? `curl: (6) Could not resolve host: ${host}` : `wget: unable to resolve host address '${host}'`;\n    }\n    default: return null; // tidak ada di buku -> Hermes\n  }\n}\n\n// =====================================================================\n// 5. SSH KE SERVER KEDUA (bkp-01)\n// =====================================================================\nfunction jalankanDiB(cmdLine) {\n  const cwdAsal = state.cwd;\n  const asal = AKTIF;\n  pakai(PROFIL.bkp);\n  state.cwd = PROFIL.bkp.server.home;\n  const hasil = jawab(cmdLine);\n  state.cwd = cwdAsal;\n  pakai(asal);\n  return hasil === null ? `bash: ${cmdLine.split(/\\s+/)[0]}: command not found` : hasil;\n}\n\nfunction parseSsh(cmdLine) {\n  const t = cmdLine.trim().split(/\\s+/);\n  if (t[0] !== 'ssh') return null;\n  const denganArg = ['-p', '-i', '-o', '-l', '-F', '-J', '-L', '-R', '-D'];\n  let target = null;\n  const sisa = [];\n  for (let i = 1; i < t.length; i++) {\n    if (target === null) {\n      if (denganArg.includes(t[i])) { i++; continue; }\n      if (t[i].startsWith('-')) continue;\n      target = t[i];\n    } else sisa.push(t[i]);\n  }\n  if (!target) return null;\n  const adaUser = target.includes('@');\n  const host = adaUser ? target.split('@')[1] : target;\n  if (host !== 'bkp' && host !== IP_BKP) return null;\n  const user = adaUser ? target.split('@')[0] : (host === 'bkp' ? 'backup' : SERVER.user);\n  return { user, sisa: sisa.join(' ').replace(/^['\"]|['\"]$/g, '') };\n}\n\nlet balasanKhusus = null;\nconst cmdBersih = command.trim();\n\nif (state.mode && (cmdBersih === '^C' || cmdBersih === '\\u0003')) {\n  state.mode = null;\n  balasanKhusus = '^C';\n} else if (state.mode === 'hostkey') {\n  const jawaban = cmdBersih.toLowerCase();\n  if (jawaban === 'yes') {\n    state.knownBkp = true; state.mode = 'password'; state.tries = 0;\n    balasanKhusus = `Warning: Permanently added '${IP_BKP}' (ED25519) to the list of known hosts.\\n${state.target.user}@${IP_BKP}'s password: `;\n  } else if (jawaban === 'no') {\n    state.mode = null;\n    balasanKhusus = 'Host key verification failed.';\n  } else {\n    state.tries = (state.tries || 0) + 1;\n    if (state.tries >= 3) { state.mode = null; balasanKhusus = 'Host key verification failed.'; }\n    else balasanKhusus = \"Please type 'yes', 'no' or the fingerprint: \";\n  }\n} else if (state.mode === 'password') {\n  if (state.target.user === 'backup' && cmdBersih === PASSWORD_BKP) {\n    state.mode = null;\n    if (state.target.sisa) {\n      balasanKhusus = jalankanDiB(state.target.sisa);\n    } else {\n      state.pila = { cwd: state.cwd };\n      state.host = 'bkp';\n      state.cwd = PROFIL.bkp.server.home;\n      history = [];\n      balasanKhusus = PROFIL.bkp.banner;\n    }\n  } else {\n    state.tries = (state.tries || 0) + 1;\n    if (state.tries >= 3) {\n      state.mode = null;\n      balasanKhusus = `${state.target.user}@${IP_BKP}: Permission denied (publickey,password).`;\n    } else {\n      balasanKhusus = `Permission denied, please try again.\\n${state.target.user}@${IP_BKP}'s password: `;\n    }\n  }\n} else if (state.host === 'bkp' && (cmdBersih === 'exit' || cmdBersih === 'logout')) {\n  state.host = null;\n  state.cwd = (state.pila && state.pila.cwd) || PROFIL.app.server.home;\n  history = [];\n  balasanKhusus = `logout\\nConnection to ${IP_BKP} closed.`;\n} else if (!state.host && (cmdBersih === 'exit' || cmdBersih === 'logout')) {\n  balasanKhusus = 'logout';\n} else if (!state.host) {\n  const tujuan = parseSsh(cmdBersih);\n  if (tujuan) {\n    state.target = tujuan;\n    state.tries = 0;\n    if (state.knownBkp) { state.mode = 'password'; balasanKhusus = `${tujuan.user}@${IP_BKP}'s password: `; }\n    else { state.mode = 'hostkey'; balasanKhusus = PROFIL.bkp.promptSidik; }\n  }\n}\n\nif (balasanKhusus !== null) {\n  return keluar({ perlu_llm: false, reply: balasanKhusus });\n}\n\n// =====================================================================\n// 6. JAWAB LANGSUNG (termasuk \"| grep\") ATAU SERAHKAN KE HERMES\n// =====================================================================\nlet langsung = null;\nconst m = command.match(/^([^|;&><`$]+)\\|\\s*grep\\s+(-[iv]+\\s+)?['\"]?([^'\"|;&><`$\\s]+)['\"]?\\s*$/);\nif (m) {\n  const opsi = m[2] || '';\n  const kecil = opsi.includes('i');\n  const balik = opsi.includes('v');\n  state.grepPola = (opsi.trim() ? opsi.trim() + ' ' : '') + m[3];\n  const hasil = jawab(m[1]);\n  delete state.grepPola;\n  if (hasil !== null) {\n    const pola = kecil ? m[3].toLowerCase() : m[3];\n    langsung = hasil.split('\\n').filter((l) => (((kecil ? l.toLowerCase() : l).includes(pola)) !== balik)).join('\\n');\n  }\n} else if (!/[|;&><`$]/.test(command)) {\n  langsung = jawab(command);\n}\n\nif (langsung !== null) {\n  return keluar({ perlu_llm: false, reply: langsung });\n}\n\n// ---- Hermes hanya untuk perintah Linux sungguhan. Kalimat biasa = \"command not found\", persis seperti bash asli. ----\nconst KATA_PERTAMA = command.trim().split(/\\s+/)[0] || '';\nconst PERINTAH_NYATA = new Set(('top htop vmstat iostat mpstat sar lsof lscpu lsblk lsmod lspci lsusb dmesg journalctl systemctl service ' +\n  'env printenv which whereis type file stat find grep egrep fgrep head tail wc sort uniq awk sed cut tr tee less more diff tar gzip gunzip zip unzip ' +\n  'xargs kill pkill killall sleep watch last lastlog groups getent su ln cp dd du df mount ip route arp ping traceroute nslookup dig host ' +\n  'python3 perl git vim vi nano base64 md5sum sha1sum sha256sum openssl rsync apt apt-get dpkg snap pip pip3 locale cal clear tty getconf ' +\n  'hostnamectl timedatectl crontab passwd chgrp strings od xxd nc').split(' '));\nif (/^(\\.\\/|\\/)/.test(KATA_PERTAMA)) {\n  return keluar({ perlu_llm: false, reply: `bash: ${KATA_PERTAMA}: No such file or directory` });\n}\nif (!PERINTAH_NYATA.has(KATA_PERTAMA)) {\n  return keluar({ perlu_llm: false, reply: `bash: ${KATA_PERTAMA}: command not found` });\n}\n\n// ---- pembatas Hermes: penanda disimpan di tabel (baris \"_hermes\") oleh kotak \"Tandai Hermes Sibuk\" SEBELUM Hermes dipanggil,\n// sehingga permintaan lain yang datang saat Hermes bekerja langsung melihatnya. Penanda kedaluwarsa sendiri dalam 20 detik. ----\nconst barisHermes = semuaState.find((r) => r && r.session === '_hermes' && String(r.versi) === VERSI_PROFIL);\nlet hermesSampai = 0;\nif (barisHermes) { try { hermesSampai = Number(JSON.parse(barisHermes.data).sampai) || 0; } catch { hermesSampai = 0; } }\nif (hermesSampai > sekarang) {\n  return keluar({ perlu_llm: false, reply: `bash: ${command.trim().split(/\\s+/)[0]}: command not found` });\n}\nconst hermesBaru = { session: '_hermes', versi: VERSI_PROFIL, data: JSON.stringify({ sampai: sekarang + 20000 }), updated: sekarang };\n\n// ---- jalur Hermes (aktor cadangan) ----\nconst isiCwd = Array.isArray(FS[state.cwd]) ? FS[state.cwd].join(', ') : '(unknown)';\n\nconst systemPrompt = `You are a Linux terminal (${SERVER.osName || 'Ubuntu 22.04'}) on a server named ${SERVER.hostname}. The logged-in user is ${SERVER.user} (a normal user, not root). Current directory: ${state.cwd}. Files in the current directory: ${isiCwd}. You ONLY output exactly what a real terminal would print for the command given, with no explanation, no greeting, and no markdown. Never say you are an AI, a simulation, or a honeypot. If you must invent data, keep it plausible and entirely FICTIONAL: use fake IP addresses in the 10.x.x.x range, and never use real names, real organizations, real passwords, or real secrets. Keep each reply under 15 lines. If a command is unknown, print: bash: <command>: command not found. If a command needs root privileges or would change the system, print a realistic Permission denied error. Stay consistent with everything printed earlier in this conversation. Always stay in character.`;\n\nconst contoh = JAWABAN_TETAP['df -h']\n  ? [{ role: 'user', content: 'df -h' }, { role: 'assistant', content: JAWABAN_TETAP['df -h'] }]\n  : [];\n\nconst payload = {\n  model: 'hermes3:3b',\n  stream: false,\n  keep_alive: '30m',\n  options: { temperature: 0.1, seed: 7, num_predict: 200 },\n  messages: [\n    { role: 'system', content: systemPrompt },\n    ...(history.length === 0 ? contoh : []),\n    ...history,\n    { role: 'user', content: command }\n  ]\n};\n\nreturn keluar({ perlu_llm: true, payload, hermesBaru });\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "a6be66da-9c7d-48f8-a59a-776e4a2c08b0",
+      "name": "Siapkan Memori"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst prep = $('Siapkan Memori').first().json;\nconst j = $input.first().json;\n\n// ---- keluaran: jawaban langsung (j.reply) atau dari Hermes (j.message.content) ----\nconst dariHermes = j.reply === undefined;\n\n// Penjaga keluaran: jawaban AI yang membuka kedok diganti pesan terminal biasa.\nfunction jagaKeluaran(teks, cmd) {\n  let t = String(teks || '').replace(/\\r/g, '').replace(/```[a-z]*\\n?/gi, '').replace(/\\*\\*/g, '').trim();\n  const bocor = /(as an ai|language model|ai model|i am an ai|i'm an ai|i cannot|i can't|i'm sorry|i apologize|sorry,|honeypot|simulat|ollama|hermes|openai|chatbot|fictional|as a terminal|my instructions|system prompt|\\b(saya|anda|kamu|maaf|prototipe|prototype|asisten|kecerdasan buatan|tidak dapat|berperan|jebakan|umpan)\\b)/i;\n  if (bocor.test(t) || /\\bAI\\b/.test(t)) return `bash: ${String(cmd).trim().split(/\\s+/)[0]}: command not found`;\n  if (!t) return `bash: ${String(cmd).trim().split(/\\s+/)[0]}: command not found`;\n  const baris = t.split('\\n');\n  if (baris.length > 15) t = baris.slice(0, 15).join('\\n');\n  return t.slice(0, 1200);\n}\n\nlet reply;\nif (dariHermes) {\n  reply = jagaKeluaran(j.message?.content, prep.command);\n} else {\n  reply = String(j.reply);\n}\n\n// ---- riwayat percakapan: dibaca dari state yang disiapkan kotak sebelumnya (tidak diubah bila dibuang karena banjir) ----\nlet keadaan = {};\ntry { keadaan = JSON.parse(prep.stateBaru.data) || {}; } catch { keadaan = {}; }\nlet history = Array.isArray(keadaan.history) ? keadaan.history : [];\nif (!prep.banjir) {\n  history.push({ role: 'user', content: prep.command });\n  history.push({ role: 'assistant', content: reply });\n  history = history.slice(-8);\n  while (JSON.stringify(history).length > 7000 && history.length > 2) history.shift();\n  keadaan.history = history;\n}\nconst stateBaru = { ...prep.stateBaru, data: JSON.stringify(keadaan), updated: Date.now() };\n\n// ---- label tingkat bahaya dan kedalaman rantai umpan ----\nfunction tingkat(cmd) {\n  const c = cmd.toLowerCase();\n  if (/\\b(rm|wget|curl|nc|ncat|chmod|chown|sudo|passwd|base64|crontab|scp|ssh|sshpass|mysql|nmap|dd|mkfs|mkfifo)\\b|\\/etc\\/shadow|\\/dev\\/tcp|\\.env|\\.ssh/.test(c)) return 'tinggi';\n  if (/^\\s*(ls|cat|pwd|whoami|id|uname|ifconfig|ip|netstat|ss|ps|env|find|grep|cd|history|hostname|head|tail|less|more)\\b/.test(c)) return 'sedang';\n  return 'rendah';\n}\nfunction tahap(cmd) {\n  const c = cmd.toLowerCase();\n  if (/\\bssh\\b|10\\.20\\.4\\.20|\\bbkp\\b/.test(c)) return 3;\n  if (/\\.env/.test(c)) return 2;\n  if (/catatan|\\.bash_history|crontab|\\.ssh|backup_to_bkp/.test(c)) return 1;\n  return 0;\n}\n\nconst host = keadaan.host || '';\nconst hdrMasuk = $('Webhook').first().json.headers || {};\nconst ipMasuk = String(hdrMasuk['x-forwarded-for'] || '').split(',')[0].trim().replace(/[^0-9a-fA-F:.]/g, '').slice(0, 45);\nconst ua = ((ipMasuk ? 'IP ' + ipMasuk + ' | ' : '') + String(hdrMasuk['user-agent'] || '-')).slice(0, 120);\nconst waktu = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });\n\nlet catat = null;\nif (!prep.banjir) {\n  catat = { ts: Date.now(), waktu, session: prep.session, command: prep.command, level: tingkat(prep.command), tahap: tahap(prep.command), host, reply: reply.slice(0, 600), ua };\n} else if (prep.banjirTanda) {\n  catat = { ts: Date.now(), waktu, session: prep.session, command: '(banjir perintah terdeteksi; perintah berikutnya diabaikan)', level: 'tinggi', tahap: 0, host, reply: '', ua };\n}\n\nreturn [{ json: { reply, catat, catat_perlu: catat !== null, stateBaru } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        0
+      ],
+      "id": "9c99a59a-5670-409e-8344-b8f894a58a80",
+      "name": "Simpan Memori"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "indrajala",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -16,
+        -16
+      ],
+      "id": "6dd98a70-b709-4af2-ab44-3a4c1a72055e",
+      "name": "Webhook",
+      "webhookId": "77dbd271-4bb6-4aa3-992a-3d50ab25b06e"
+    },
+    {
+      "parameters": {
+        "path": "indrajala-log",
+        "authentication": "basicAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -64,
+        208
+      ],
+      "id": "5c614267-419b-4ceb-9c03-5a61fee3ecc8",
+      "name": "Webhook Dashboard",
+      "webhookId": "cee71360-2a91-47cd-abe5-6db687749786",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "92DIDdwaYBK7rA4H",
+          "name": "Unnamed credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1056,
+        208
+      ],
+      "id": "7ca44deb-e2f4-4f7b-a9c1-e6cdf2963981",
+      "name": "Respond to Webhook Dashboard"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Semua data dibaca dari Data Table (diisi kotak \"Ambil Log\", \"Ambil Canary\", \"Ambil Unduhan\").\nconst ambil = (nama) => $(nama).all().map((i) => i.json);\nconst num = (v) => Number(v) || 0;\n\nconst log = ambil('Ambil Log')\n  .filter((e) => num(e.ts) > 0)\n  .map((e) => ({ ...e, ts: num(e.ts), tahap: num(e.tahap), session: String(e.session ?? ''), command: String(e.command ?? '') }))\n  .sort((a, b) => a.ts - b.ts);\nconst canary = ambil('Ambil Canary').filter((c) => num(c.ts) > 0).map((c) => ({ ts: num(c.ts), token: String(c.token ?? ''), ua: c.ua }));\nconst unduhan = ambil('Ambil Unduhan').filter((u) => num(u.ts) > 0).map((u) => ({ ts: num(u.ts), kode: String(u.kode ?? ''), session: String(u.session ?? ''), file: u.file, ua: u.ua }));\n\n// Pengaman: apa pun yang berasal dari penyerang dibersihkan sebelum ditampilkan.\nconst esc = (s) => String(s ?? '')\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\n\nconst label = { tinggi: '🔴 TINGGI', sedang: '🟡 PENGINTAIAN', rendah: '🟢 RENDAH' };\nconst namaTahap = ['Baru masuk', 'Menemukan petunjuk', 'Mengambil kredensial umpan', 'Mencoba pindah server'];\nconst wib = (ms) => new Date(ms).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });\nconst durasi = (ms) => {\n  const total = Math.round(ms / 1000);\n  const jam = Math.floor(total / 3600);\n  const mnt = Math.floor((total % 3600) / 60);\n  const dtk = total % 60;\n  if (jam > 0) return `${jam} jam ${mnt} mnt`;\n  if (mnt > 0) return `${mnt} mnt ${dtk} dtk`;\n  return `${dtk} dtk`;\n};\n\n// ---- kelompokkan per penyusup (Map: aman untuk nama sesi apa pun) ----\nconst sesi = new Map();\nfor (const e of log) {\n  if (!sesi.has(e.session)) sesi.set(e.session, { id: e.session, awal: e.ts, akhir: e.ts, langkah: 0, tinggi: 0, tahap: 0, ua: e.ua });\n  const s = sesi.get(e.session);\n  s.awal = Math.min(s.awal, e.ts);\n  s.akhir = Math.max(s.akhir, e.ts);\n  s.langkah += 1;\n  if (e.level === 'tinggi') s.tinggi += 1;\n  s.tahap = Math.max(s.tahap, Math.min(3, e.tahap));\n}\nconst daftar = [...sesi.values()].sort((a, b) => b.akhir - a.akhir);\nconst lama = daftar.map((s) => s.akhir - s.awal);\nconst terlama = lama.length ? Math.max(...lama) : 0;\nconst rata = lama.length ? lama.reduce((a, b) => a + b, 0) / lama.length : 0;\nconst sampaiUmpan = daftar.filter((s) => s.tahap >= 2).length;\nconst sampaiPindah = daftar.filter((s) => s.tahap >= 3).length;\nconst jumlahTinggi = log.filter((e) => e.level === 'tinggi').length;\n\n// ---- alarm otomatis (dihitung dari data; tidak bisa dibujuk AI) ----\n// Nilai ini HARUS sama dengan password palsu di .env.bak dan tabel profil.\nconst TOKEN_UMPAN = ['Bk#4rTz9Vn', 'Wb!7qLm2Xp'];\n\nconst alarm = [];\nconst sudah = new Set();\nfor (const e of log) {\n  const cek = [];\n  if (TOKEN_UMPAN.some((k) => e.command.includes(k))) cek.push(['kredensial-dipakai', 'KRITIS', 'Kredensial umpan DIGUNAKAN penyusup']);\n  if (e.host === 'bkp') cek.push(['masuk-server-kedua', 'KRITIS', 'Penyusup BERHASIL masuk ke server kedua (bkp-01)']);\n  if (e.tahap >= 3) cek.push(['pindah-server', 'TINGGI', 'Penyusup mencoba pindah ke server lain']);\n  if (e.tahap >= 2) cek.push(['umpan-dibaca', 'TINGGI', 'Penyusup membaca file umpan berisi kredensial']);\n  if (e.command.startsWith('[sqli]')) cek.push(['sqli', 'TINGGI', 'Percobaan SQL injection di website']);\n  if (e.command.startsWith('[honeylink]')) cek.push(['honeylink', 'TINGGI', 'Honey-link di website dikunjungi']);\n  if (e.command.startsWith('[pemindai]')) cek.push(['pemindai', 'TINGGI', 'Pemindai otomatis terdeteksi di website']);\n  if (e.command.startsWith('(banjir perintah')) cek.push(['banjir', 'TINGGI', 'Banjir perintah terdeteksi (kemungkinan alat otomatis)']);\n  for (const [jenis, tingkat, pesan] of cek) {\n    const kunci = e.session + '|' + jenis;\n    if (sudah.has(kunci)) continue;\n    sudah.add(kunci);\n    alarm.push({ ts: e.ts, session: e.session, tingkat, pesan, command: e.command });\n  }\n}\nfor (const u of unduhan) {\n  alarm.push({ ts: u.ts, session: u.session, tingkat: 'TINGGI', pesan: 'Berkas umpan DIUNDUH: ' + u.file, command: u.ua });\n}\nfor (const c of canary) {\n  const u = unduhan.find((x) => x.kode === c.token);\n  if (u) alarm.push({ ts: c.ts, session: u.session, tingkat: 'KRITIS', pesan: 'Dokumen umpan DIBUKA: ' + c.token, command: c.ua });\n  else alarm.push({ ts: c.ts, session: '(tidak dikenal)', tingkat: 'TINGGI', pesan: 'Token canary TIDAK DIKENAL (kemungkinan percobaan pemalsuan): ' + c.token, command: c.ua });\n}\nalarm.sort((a, b) => b.ts - a.ts); // terbaru di atas\nconst adaKritis = alarm.some((a) => a.tingkat === 'KRITIS');\n\nconst barisAlarm = alarm.slice(0, 20).map((a) => `\n<tr>\n  <td>${esc(wib(a.ts))}</td>\n  <td><span class=\"${a.tingkat === 'KRITIS' ? 'kritis' : 'tinggi'}\">${esc(a.tingkat)}</span></td>\n  <td>${esc(a.session)}</td>\n  <td>${esc(a.pesan)}</td>\n  <td><code>${esc(a.command)}</code></td>\n</tr>`).join('');\n\nconst barisSesi = daftar.map((s) => `\n<tr>\n  <td>${esc(s.id)}</td>\n  <td>${esc(wib(s.awal))}</td>\n  <td><b>${esc(durasi(s.akhir - s.awal))}</b></td>\n  <td>${s.langkah}</td>\n  <td class=\"${s.tinggi > 0 ? 'tinggi' : ''}\">${s.tinggi}</td>\n  <td>${'●'.repeat(s.tahap)}${'○'.repeat(3 - s.tahap)} ${esc(namaTahap[s.tahap])}</td>\n  <td>${esc(s.ua)}</td>\n  <td><a href=\"/webhook/indrajala-analisis?session=${encodeURIComponent(s.id)}\">🔎 Analisis</a></td>\n</tr>`).join('');\n\nconst barisLog = log.slice(-100).reverse().map((e) => `\n<tr>\n  <td>${esc(e.waktu)}</td>\n  <td>${esc(e.session)}</td>\n  <td><code>${esc(e.command)}</code></td>\n  <td class=\"${esc(e.level)}\">${label[e.level] || ''}</td>\n  <td><pre>${esc(String(e.reply ?? '').slice(0, 600))}</pre></td>\n</tr>`).join('');\n\nconst html = `<!DOCTYPE html>\n<html lang=\"id\"><head><meta charset=\"utf-8\">\n<meta http-equiv=\"refresh\" content=\"10\">\n<title>Indrajala - Buku Tamu</title>\n<style>\nbody{font-family:Segoe UI,Arial,sans-serif;background:#0f1419;color:#e6e6e6;margin:24px}\nh1{margin:0 0 4px}\nh2{margin:28px 0 8px;font-size:18px}\na{color:#7cc4ff}\n.ringkas{display:flex;gap:16px;margin:16px 0;flex-wrap:wrap}\n.kartu{background:#1c2430;padding:12px 20px;border-radius:8px;min-width:140px}\n.kartu b{font-size:26px;display:block}\ntable{border-collapse:collapse;width:100%}\nth,td{border-bottom:1px solid #2c3746;padding:8px;text-align:left;vertical-align:top;font-size:14px}\nth{background:#1c2430}\npre{margin:0;white-space:pre-wrap;font-size:12px;color:#9fb3c8}\ncode{color:#f7c873}\n.tinggi{color:#ff6b5b;font-weight:bold}\n.sedang{color:#f0b429;font-weight:bold}\n.rendah{color:#4cc38a;font-weight:bold}\n.kritis{color:#fff;background:#b3261e;font-weight:bold;padding:2px 8px;border-radius:4px}\n.banner{background:#b3261e;color:#fff;padding:12px 16px;border-radius:8px;margin:12px 0;font-weight:bold}\n</style></head><body>\n<h1>🕸️ Indrajala: Buku Tamu Jebakan</h1>\n<div>Menyegarkan diri tiap 10 detik. Data tersimpan lokal di laptop ini.</div>\n\n<div class=\"ringkas\">\n  <div class=\"kartu\"><b>${daftar.length}</b>penyusup (sesi)</div>\n  <div class=\"kartu\"><b>${esc(durasi(terlama))}</b>waktu tertahan terlama</div>\n  <div class=\"kartu\"><b>${esc(durasi(rata))}</b>rata-rata waktu tertahan</div>\n  <div class=\"kartu\"><b>${sampaiUmpan}</b>sampai mengambil umpan</div>\n  <div class=\"kartu\"><b>${sampaiPindah}</b>mencoba pindah server</div>\n  <div class=\"kartu\"><b>${jumlahTinggi}</b>perintah bahaya tinggi</div>\n</div>\n\n${adaKritis ? '<div class=\"banner\">🚨 ALARM KRITIS: umpan telah dipakai atau dibuka penyusup!</div>' : ''}\n<h2>⚠️ Peringatan otomatis</h2>\n<table>\n<tr><th>Waktu (WIB)</th><th>Tingkat</th><th>Sesi</th><th>Kejadian</th><th>Perintah / klien pemicu</th></tr>\n${barisAlarm || '<tr><td colspan=\"5\">Belum ada alarm. Belum ada yang menyentuh umpan.</td></tr>'}\n</table>\n\n<h2>Per penyusup</h2>\n<table>\n<tr><th>Sesi</th><th>Mulai (WIB)</th><th>Waktu tertahan</th><th>Langkah</th><th>Bahaya tinggi</th><th>Kedalaman rantai umpan</th><th>Alat penyerang</th><th>Analisis</th></tr>\n${barisSesi || '<tr><td colspan=\"8\">Belum ada tamu. Jebakan masih sepi.</td></tr>'}\n</table>\n\n<h2>Riwayat perintah (100 terakhir)</h2>\n<table>\n<tr><th>Waktu (WIB)</th><th>Sesi</th><th>Perintah</th><th>Tingkat</th><th>Balasan palsu kita</th></tr>\n${barisLog || '<tr><td colspan=\"5\">Belum ada perintah.</td></tr>'}\n</table>\n</body></html>`;\n\nreturn [{ json: { html } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        816,
+        208
+      ],
+      "id": "5e21f544-6ec8-4086-b689-7612ab09f5bb",
+      "name": "Buat Dashboard"
+    },
+    {
+      "parameters": {
+        "path": "indrajala-analisis",
+        "authentication": "basicAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -64,
+        368
+      ],
+      "id": "58bf16c2-bc39-457e-81b7-4221d077b5de",
+      "name": "Webhook Analisis",
+      "webhookId": "969c187b-3e45-4ed8-b99b-edbb58e68e05",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "92DIDdwaYBK7rA4H",
+          "name": "Unnamed credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Data dibaca dari tabel (kotak \"Ambil Log Analisis\"). Hermes HANYA menerima fakta hasil hitungan,\n// tidak pernah teks perintah mentah dari penyerang (tahan prompt injection).\nconst q = $('Webhook Analisis').first().json.query || {};\nconst sesi = String(q.session || '').replace(/[^\\w.\\-]/g, '').slice(0, 40);\nconst num = (v) => Number(v) || 0;\n\nconst entri = $('Ambil Log Analisis').all().map((i) => i.json)\n  .filter((e) => num(e.ts) > 0 && String(e.session) === sesi)\n  .map((e) => ({ ...e, ts: num(e.ts), tahap: num(e.tahap), command: String(e.command ?? '') }))\n  .sort((a, b) => a.ts - b.ts);\n\nconst namaTahap = ['Baru masuk', 'Menemukan petunjuk', 'Mengambil kredensial umpan', 'Mencoba pindah server'];\n\n// Sesi tidak ditemukan: kirim permintaan sangat kecil ke Hermes supaya alur tetap lurus.\nif (entri.length === 0) {\n  return [{\n    json: {\n      kosong: true, sesi, laporan: null,\n      payload: { model: 'hermes3:3b', stream: false, options: { num_predict: 1 }, messages: [{ role: 'user', content: 'ok' }] }\n    }\n  }];\n}\n\n// ---- Kamus teknik MITRE ATT&CK (pemetaan pasti berbasis pola, bukan tebakan AI) ----\nconst TEKNIK = [\n  [/\\b(whoami|id|who|w)\\b/, 'T1033', 'System Owner/User Discovery', 'Discovery'],\n  [/\\b(ls|find|tree)\\b/, 'T1083', 'File and Directory Discovery', 'Discovery'],\n  [/\\bps\\b/, 'T1057', 'Process Discovery', 'Discovery'],\n  [/\\b(uname|hostname|lsb_release|os-release)\\b/, 'T1082', 'System Information Discovery', 'Discovery'],\n  [/\\b(ip a|ip addr|ifconfig)\\b|hostname -i/, 'T1016', 'System Network Configuration Discovery', 'Discovery'],\n  [/\\b(ss|netstat)\\b/, 'T1049', 'System Network Connections Discovery', 'Discovery'],\n  [/\\bnmap\\b/, 'T1046', 'Network Service Discovery', 'Discovery'],\n  [/\\/etc\\/passwd/, 'T1087.001', 'Account Discovery: Local Account', 'Discovery'],\n  [/\\/etc\\/shadow/, 'T1003.008', 'OS Credential Dumping: /etc/passwd and /etc/shadow', 'Credential Access'],\n  [/\\.env|config\\.php|id_rsa/, 'T1552.001', 'Unsecured Credentials: Credentials In Files', 'Credential Access'],\n  [/\\.bash_history|\\bhistory\\b/, 'T1552.003', 'Unsecured Credentials: Bash History', 'Credential Access'],\n  [/(^|\\s)(ssh|sshpass|scp)(\\s|$)/, 'T1021.004', 'Remote Services: SSH', 'Lateral Movement'],\n  [/\\b(wget|curl)\\b/, 'T1105', 'Ingress Tool Transfer', 'Command and Control'],\n  [/\\bsudo\\b/, 'T1548.003', 'Abuse Elevation Control Mechanism: Sudo and Sudo Caching', 'Privilege Escalation'],\n  [/\\b(chmod|chown)\\b/, 'T1222.002', 'File and Directory Permissions Modification', 'Defense Evasion'],\n  [/\\brm\\b/, 'T1070.004', 'Indicator Removal: File Deletion', 'Defense Evasion'],\n  [/\\bcrontab\\b/, 'T1053.003', 'Scheduled Task/Job: Cron', 'Persistence']\n];\n\nconst teknik = new Map();\nfor (const e of entri) {\n  const c = e.command.toLowerCase();\n  for (const [re, id, nama, taktik] of TEKNIK) {\n    if (re.test(c)) {\n      if (!teknik.has(id)) teknik.set(id, { id, nama, taktik, jumlah: 0, contoh: e.command.slice(0, 120) });\n      teknik.get(id).jumlah += 1;\n    }\n  }\n}\n\nconst awal = entri[0].ts;\nconst akhir = entri[entri.length - 1].ts;\nconst tahapMax = Math.min(3, Math.max(...entri.map((e) => e.tahap)));\nconst masukBkp = entri.some((e) => String(e.host) === 'bkp');\nconst tinggi = entri.filter((e) => e.level === 'tinggi').length;\n\nconst laporan = {\n  sesi, awal, akhir,\n  langkah: entri.length, tinggi,\n  tahap: tahapMax, namaTahap: namaTahap[tahapMax],\n  timeline: entri.map((e) => ({ t: e.ts - awal, command: e.command.slice(0, 200), level: e.level })),\n  teknik: [...teknik.values()]\n};\n\n// ---- Bahan untuk Hermes: HANYA fakta terhitung (tanpa teks dari penyerang) ----\nconst urutTaktik = [...new Set(laporan.teknik.map((t) => t.taktik))];\nconst fakta = [\n  `Session duration: ${Math.round((akhir - awal) / 1000)} seconds`,\n  `Commands typed: ${entri.length}; high-risk commands: ${tinggi}`,\n  `Deepest bait stage reached: ${tahapMax} of 3 (${namaTahap[tahapMax]})`,\n  `Reached the second server: ${masukBkp ? 'yes' : 'no'}`,\n  `ATT&CK techniques detected: ${laporan.teknik.map((t) => `${t.id} ${t.nama}`).join('; ') || 'none'}`,\n  `Tactics in order of first appearance: ${urutTaktik.join(' -> ') || 'none'}`\n].join('\\n');\n\nconst payload = {\n  model: 'hermes3:3b',\n  stream: false,\n  keep_alive: '30m',\n  options: { temperature: 0.2, num_predict: 160 },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are a cybersecurity analyst reviewing an intruder session on a decoy (honeypot) server. Write a summary in Indonesian of at most 3 short sentences: what the intruder seems to be trying to achieve and how far they got. Use ONLY the facts provided. No markdown, no lists.'\n    },\n    { role: 'user', content: fakta }\n  ]\n};\n\nreturn [{ json: { kosong: false, sesi, laporan, payload } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        368
+      ],
+      "id": "1bb48999-859d-4b7d-a963-5b8d46c6aa46",
+      "name": "Siapkan Analisis"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        608,
+        368
+      ],
+      "id": "11ea8b06-1e3d-449f-9c69-a22e2a6c74da",
+      "name": "Analis Hermes",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('Siapkan Analisis').first().json;\nconst j = $input.first().json;\nconst ringkasan = String(j.message?.content || '').trim().slice(0, 700);\n\n// Pengaman: perintah penyerang dibersihkan sebelum ditampilkan.\nconst esc = (s) => String(s ?? '')\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\nconst wib = (ms) => new Date(ms).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });\nconst durasi = (ms) => {\n  const total = Math.round(ms / 1000);\n  const jam = Math.floor(total / 3600);\n  const mnt = Math.floor((total % 3600) / 60);\n  const dtk = total % 60;\n  if (jam > 0) return `${jam} jam ${mnt} mnt`;\n  if (mnt > 0) return `${mnt} mnt ${dtk} dtk`;\n  return `${dtk} dtk`;\n};\nconst offset = (ms) => {\n  const t = Math.round(ms / 1000);\n  return '+' + String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');\n};\nconst label = { tinggi: '🔴 TINGGI', sedang: '🟡 PENGINTAIAN', rendah: '🟢 RENDAH' };\n\nconst css = `\nbody{font-family:Segoe UI,Arial,sans-serif;background:#0f1419;color:#e6e6e6;margin:24px;max-width:1100px}\nh1{margin:0 0 4px} h2{margin:28px 0 8px;font-size:18px}\na{color:#7cc4ff}\n.ringkas{display:flex;gap:16px;margin:16px 0;flex-wrap:wrap}\n.kartu{background:#1c2430;padding:12px 20px;border-radius:8px;min-width:140px}\n.kartu b{font-size:22px;display:block}\n.ai{background:#1c2430;border-left:4px solid #7cc4ff;padding:12px 16px;border-radius:6px;line-height:1.5}\n.ai small{color:#9fb3c8;display:block;margin-top:8px}\ntable{border-collapse:collapse;width:100%}\nth,td{border-bottom:1px solid #2c3746;padding:8px;text-align:left;vertical-align:top;font-size:14px}\nth{background:#1c2430}\ncode{color:#f7c873}\n.tinggi{color:#ff6b5b;font-weight:bold} .sedang{color:#f0b429;font-weight:bold} .rendah{color:#4cc38a;font-weight:bold}`;\n\nlet isi;\nif (data.kosong) {\n  isi = `<h1>Analisis penyusup</h1>\n<p>Tidak ada catatan untuk sesi <code>${esc(data.sesi)}</code>.</p>\n<p><a href=\"/webhook/indrajala-log\">← Kembali ke dashboard</a></p>`;\n} else {\n  const L = data.laporan;\n  const baristeknik = L.teknik.map((t) => `\n<tr><td><code>${esc(t.id)}</code></td><td>${esc(t.nama)}</td><td>${esc(t.taktik)}</td><td>${t.jumlah}x</td><td><code>${esc(t.contoh)}</code></td></tr>`).join('');\n  const barisWaktu = L.timeline.map((x) => `\n<tr><td>${esc(offset(x.t))}</td><td><code>${esc(x.command)}</code></td><td class=\"${esc(x.level)}\">${label[x.level] || ''}</td></tr>`).join('');\n  const kotakAi = ringkasan\n    ? `<div class=\"ai\">${esc(ringkasan)}<small>Ringkasan ini ditulis AI lokal (Hermes) dan bisa keliru. Fakta ada di tabel di bawahnya.</small></div>`\n    : `<div class=\"ai\">Ringkasan AI tidak tersedia (Hermes belum menjawab). Tabel di bawah tetap valid.</div>`;\n\n  isi = `<h1>🔎 Analisis penyusup: ${esc(L.sesi)}</h1>\n<div><a href=\"/webhook/indrajala-log\">← Kembali ke dashboard</a></div>\n<div class=\"ringkas\">\n  <div class=\"kartu\"><b>${esc(durasi(L.akhir - L.awal))}</b>waktu tertahan</div>\n  <div class=\"kartu\"><b>${L.langkah}</b>langkah</div>\n  <div class=\"kartu\"><b>${L.tinggi}</b>perintah bahaya tinggi</div>\n  <div class=\"kartu\"><b>${'●'.repeat(L.tahap)}${'○'.repeat(3 - L.tahap)}</b>${esc(L.namaTahap)}</div>\n</div>\n<h2>Ringkasan analis (AI)</h2>\n${kotakAi}\n<h2>Teknik MITRE ATT&amp;CK yang terdeteksi (pemetaan pasti)</h2>\n<table>\n<tr><th>ID</th><th>Teknik</th><th>Taktik</th><th>Jumlah</th><th>Contoh perintah</th></tr>\n${baristeknik || '<tr><td colspan=\"5\">Belum ada teknik yang dikenali.</td></tr>'}\n</table>\n<h2>Garis waktu (mulai ${esc(wib(L.awal))} WIB)</h2>\n<table>\n<tr><th>Waktu</th><th>Perintah</th><th>Tingkat</th></tr>\n${barisWaktu}\n</table>`;\n}\n\nconst html = `<!DOCTYPE html><html lang=\"id\"><head><meta charset=\"utf-8\"><title>Indrajala - Analisis</title><style>${css}</style></head><body>${isi}</body></html>`;\nreturn [{ json: { html } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        368
+      ],
+      "id": "42b9ad86-9dd8-44bf-b9cd-1b32db20e141",
+      "name": "Render Analisis"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1056,
+        368
+      ],
+      "id": "2dc862f2-cd44-4dd2-a5a3-8241a363cae8",
+      "name": "Respond to Webhook1"
+    },
+    {
+      "parameters": {
+        "path": "indrajala-canary",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -64,
+        528
+      ],
+      "id": "3160ab46-a768-454b-8af8-f3255a4e49c5",
+      "name": "Webhook Canary",
+      "webhookId": "845be95e-e4d2-47af-a2bd-890ff93688ea"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hanya menyiapkan baris untuk tabel indrajala_canary (disimpan oleh kotak Data table sesudahnya).\nconst j = $input.first().json;\nconst q = j.query || {};\nconst token = /^[A-Za-z0-9\\-]{1,40}$/.test(String(q.id || '')) ? String(q.id) : 'tidak-valid';\nconst ip = String((j.headers || {})['x-forwarded-for'] || '').split(',')[0].trim().replace(/[^0-9a-fA-F:.]/g, '').slice(0, 45);\nconst ua = ((ip ? 'IP ' + ip + ' | ' : '') + String((j.headers || {})['user-agent'] || '-')).slice(0, 160);\nreturn [{ json: { catat: { ts: Date.now(), token, ua } } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        528
+      ],
+      "id": "3a1b4737-65f5-4f55-a175-2656dd1f72d7",
+      "name": "Catat Canary"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<html><head><title>404 Not Found</title></head><body><h1>Not Found</h1><p>The requested URL was not found on this server.</p></body></html>",
+        "options": {
+          "responseCode": 404,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        608,
+        528
+      ],
+      "id": "d6edd5d3-61de-427a-8797-1892c6f3d186",
+      "name": "Respond to Webhook2"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "wM9Hr9Vpq3VowX1R",
+          "mode": "list",
+          "cachedResultName": "indrajala profil",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/wM9Hr9Vpq3VowX1R"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -16,
+        -192
+      ],
+      "id": "379de990-dd36-4e36-b1c9-79b346311d5a",
+      "name": "Ambil Profil",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "hC4BQGokAAX53AlG",
+          "mode": "list",
+          "cachedResultName": "indrajala berkas",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/hC4BQGokAAX53AlG"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        -192
+      ],
+      "id": "5ae785e6-fe59-4e85-a797-49b1f3e7672b",
+      "name": "Ambil Berkas",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "OJOldeqpvKwXyo6R",
+          "mode": "list",
+          "cachedResultName": "indrajala proses",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/OJOldeqpvKwXyo6R"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        560,
+        -192
+      ],
+      "id": "d6cd4f1b-1bd1-4da6-b03b-1bdb17d1e215",
+      "name": "Ambil Proses",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "MNHr5uUGBpG5f2qh",
+          "mode": "list",
+          "cachedResultName": "indrajala jawaban",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/MNHr5uUGBpG5f2qh"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        32
+      ],
+      "id": "cb40a670-b8e1-4dd2-8488-80694fb8856f",
+      "name": "Ambil Jawaban",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "path": "indrajala-unduh",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -64,
+        912
+      ],
+      "id": "17057262-13bb-4442-8b91-372cb5f849d4",
+      "name": "Webhook Unduh",
+      "webhookId": "5a42deaf-0f38-45fe-bd41-8b5fd50e2a87"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Kotak ini membuat PDF umpan dengan kode UNIK setiap kali ada yang mengunduh,\n// dan menyiapkan baris catatan (siapa, kapan, dengan apa) untuk tabel indrajala_unduhan.\nconst masuk = $input.first().json;\nconst q = masuk.query || {};\nconst hdr = masuk.headers || {};\n\nconst host = String(hdr.host || 'localhost:5678').replace(/[^A-Za-z0-9.:\\-]/g, '');\nconst ip = String(hdr['x-forwarded-for'] || '').split(',')[0].trim().replace(/[^0-9a-fA-F:.]/g, '').slice(0, 45);\nconst ua = ((ip ? 'IP ' + ip + ' | ' : '') + String(hdr['user-agent'] || '-')).slice(0, 160);\nconst sesi = String(q.s || '').replace(/[^\\w\\-.]/g, '').slice(0, 60) || '(tanpa sesi)';\nconst berkas = String(q.f || '');\n\n// Daftar berkas umpan yang boleh diunduh (tambah nama lain di sini nanti)\nconst DAFTAR = ['Rekap_Belanja_TI_Q3_2026.pdf'];\n\nif (!DAFTAR.includes(berkas)) {\n  return [{\n    json: {\n      status: 404, mime: 'text/plain', namaFile: 'tidak-ditemukan.txt', disposisi: 'inline',\n      base64: Buffer.from('Not Found', 'utf8').toString('base64')\n    }\n  }];\n}\n\n// ---- catat unduhan dan buat kode unik ----\nconst id = 'ANGGARAN-Q3-' + Math.random().toString(36).slice(2, 8);\n\nconst url = `http://${host}/portal/lampiran?id=${id}`;\n\n// ---- susun isi halaman PDF ----\nconst S = [];\nconst esc = (t) => String(t).replace(/\\\\/g, '\\\\\\\\').replace(/\\(/g, '\\\\(').replace(/\\)/g, '\\\\)');\nconst teks = (x, y, ukuran, font, t, warna) =>\n  S.push(`BT /${font} ${ukuran} Tf ${warna || '0 0 0'} rg 1 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)} Tm (${esc(t)}) Tj ET`);\nconst kotak = (x, y, w, h, warna) => S.push(`${warna} rg ${x.toFixed(2)} ${y.toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)} re f`);\nconst garis = (x1, y1, x2, y2, warna, tebal) =>\n  S.push(`${warna} RG ${tebal} w ${x1.toFixed(2)} ${y1.toFixed(2)} m ${x2.toFixed(2)} ${y2.toFixed(2)} l S`);\nconst lebarAngka = (t, ukuran) => ukuran * ([...t].reduce((a, c) => a + (c === '.' ? 0.278 : 0.556), 0));\n\nconst KIRI = 56.7, KANAN = 538.3;\nteks(152.0, 785, 17, 'F2', 'Rekapitulasi Belanja Infrastruktur TI');\nteks(140.6, 768, 10, 'F1', 'Triwulan III Tahun Anggaran 2026  |  Unit Layanan Teknologi Informasi', '0.33 0.33 0.33');\n[\n  'Dokumen ini merangkum realisasi belanja infrastruktur TI sampai akhir September 2026. Secara',\n  'umum realisasi berada di bawah pagu karena pengadaan perangkat jaringan bergeser ke triwulan IV.',\n  'Rincian vendor, nomor kontrak, dan akses administrasi server berkas dipisahkan dalam lampiran.'\n].forEach((l, i) => teks(KIRI, 735 - i * 15, 10.5, 'F1', l));\n\n// tabel\nconst kolomX = [56.7, 232.4, 331.6, 439.3, 538.5];\nconst tinggi = 22;\nconst baris = [\n  ['Server dan penyimpanan', '420.000.000', '318.450.000', '101.550.000'],\n  ['Perangkat jaringan', '260.000.000', '96.200.000', '163.800.000'],\n  ['Lisensi perangkat lunak', '150.000.000', '148.750.000', '1.250.000'],\n  ['Langganan konektivitas', '180.000.000', '135.000.000', '45.000.000'],\n  ['Pemeliharaan dan dukungan', '95.000.000', '61.300.000', '33.700.000'],\n  ['Total', '1.105.000.000', '759.700.000', '345.300.000']\n];\nconst atas = 670;\nkotak(kolomX[0], atas - tinggi, kolomX[4] - kolomX[0], tinggi, '0.122 0.227 0.373');\nteks(kolomX[0] + 6, atas - tinggi + 7, 9, 'F2', 'Pos belanja', '1 1 1');\n[['Pagu (Rp)', 42.5], ['Realisasi (Rp)', 59.5], ['Sisa (Rp)', 39.0]].forEach(([t, lebar], i) =>\n  teks(kolomX[i + 2] - 6 - lebar, atas - tinggi + 7, 9, 'F2', t, '1 1 1'));\nbaris.forEach((r, i) => {\n  const bawah = atas - tinggi * (i + 2);\n  const total = i === baris.length - 1;\n  kotak(kolomX[0], bawah, kolomX[4] - kolomX[0], tinggi, total ? '0.9 0.925 0.957' : (i % 2 === 0 ? '1 1 1' : '0.953 0.965 0.98'));\n  const font = total ? 'F2' : 'F1';\n  teks(kolomX[0] + 6, bawah + 7, 9.5, font, r[0]);\n  for (let k = 1; k <= 3; k++) teks(kolomX[k + 1] - 6 - lebarAngka(r[k], 9.5), bawah + 7, 9.5, font, r[k]);\n});\nfor (let i = 0; i <= baris.length + 1; i++) garis(kolomX[0], atas - tinggi * i, kolomX[4], atas - tinggi * i, '0.78 0.82 0.855', 0.4);\nkolomX.forEach((x) => garis(x, atas, x, atas - tinggi * (baris.length + 1), '0.78 0.82 0.855', 0.4));\n\n// catatan\nteks(KIRI, 490, 11, 'F2', 'Catatan');\n[\n  '1. Pengadaan switch dan akses nirkabel dijadwalkan ulang ke triwulan IV.',\n  '2. Kontrak konektivitas diperpanjang sampai Maret 2027.',\n  '3. Audit hak akses server berkas dijadwalkan bersamaan dengan rilis aplikasi berikutnya.'\n].forEach((l, i) => teks(KIRI, 470 - i * 15, 10.5, 'F1', l));\n\n// tautan canary (satu-satunya pemicu: harus diklik)\nteks(KIRI, 410, 10.5, 'F1', 'Lampiran lengkap (rincian vendor dan akses server): ');\nteks(304.71, 410, 10.5, 'F1', 'Buka lampiran di portal internal', '0.102 0.337 0.859');\ngaris(304.71, 408.3, 449.43, 408.3, '0.102 0.337 0.859', 0.6);\nteks(KIRI, 372, 8.5, 'F1', 'Disusun oleh Unit Layanan Teknologi Informasi.', '0.47 0.47 0.47');\nteks(KIRI, 34, 8, 'F1', 'DOKUMEN INTERNAL - TERBATAS. Jangan disebarluaskan di luar unit.', '0.47 0.47 0.47');\nteks(490, 34, 8, 'F1', 'Halaman 1', '0.47 0.47 0.47');\nconst stream = S.join('\\n');\n\n// ---- rakit berkas PDF ----\nconst objek = [\n  '<< /Type /Catalog /Pages 2 0 R >>',\n  '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',\n  '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R /Annots [7 0 R] >>',\n  `<< /Length ${stream.length} >>\\nstream\\n${stream}\\nendstream`,\n  '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',\n  '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>',\n  `<< /Type /Annot /Subtype /Link /Rect [304.71 405 449.43 418] /Border [0 0 0] /A << /S /URI /URI (${url}) >> >>`,\n  '<< /Title (Rekapitulasi Belanja Infrastruktur TI Triwulan III 2026) /Author (Unit Layanan Teknologi Informasi) >>'\n];\nlet pdf = '%PDF-1.4\\n';\nconst letak = [];\nobjek.forEach((o, i) => { letak.push(pdf.length); pdf += `${i + 1} 0 obj\\n${o}\\nendobj\\n`; });\nconst xref = pdf.length;\npdf += `xref\\n0 ${objek.length + 1}\\n0000000000 65535 f \\n`;\nfor (const o of letak) pdf += String(o).padStart(10, '0') + ' 00000 n \\n';\npdf += `trailer\\n<< /Size ${objek.length + 1} /Root 1 0 R /Info 8 0 R >>\\nstartxref\\n${xref}\\n%%EOF\\n`;\n\nreturn [{\n  json: {\n    status: 200, mime: 'application/pdf', namaFile: berkas,\n    catat: { ts: Date.now(), kode: id, session: sesi, file: berkas, ua },\n    disposisi: `attachment; filename=\"${berkas}\"`,\n    base64: Buffer.from(pdf, 'latin1').toString('base64')\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        912
+      ],
+      "id": "fb16aca3-4e98-47b2-bfab-245bac2bb126",
+      "name": "Siapkan Unduhan"
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "base64",
+        "options": {
+          "fileName": "={{ $json.namaFile }}",
+          "mimeType": "={{ $json.mime }}"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.2,
+      "position": [
+        640,
+        912
+      ],
+      "id": "a083f77a-a665-475c-9ed4-c7932d4c2815",
+      "name": "Convert to File"
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "options": {
+          "responseCode": "={{ $('Siapkan Unduhan').first().json.status }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Disposition",
+                "value": "={{ $('Siapkan Unduhan').first().json.disposisi }}"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        864,
+        912
+      ],
+      "id": "4317ed0e-b94d-4112-b41e-1271d77c61a6",
+      "name": "Respond to Webhook3"
+    },
+    {
+      "parameters": {
+        "path": "indrajala-portal",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -64,
+        768
+      ],
+      "id": "85d80160-ecdc-4f29-b19e-471219b055cc",
+      "name": "Webhook Portal",
+      "webhookId": "44612f91-dbb2-4517-b648-c3e42486818a"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        384,
+        768
+      ],
+      "id": "ae6c5c39-bd78-437f-b92b-71d5522e9462",
+      "name": "Respond to Webhook4"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "00f2c1aa-e806-48f9-bbc1-3f371fa882c5",
+              "leftValue": "={{ $json.catat_perlu }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        1792,
+        0
+      ],
+      "id": "2e7c03a1-56a0-4e2f-b0bc-84b92d5511a8",
+      "name": "Perlu Catat?"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "cRik7Ds9pf6PSXNY",
+          "mode": "list",
+          "cachedResultName": "indrajala log",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/cRik7Ds9pf6PSXNY"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ts": "={{ $json.catat.ts }}",
+            "waktu": "={{ $json.catat.waktu }}",
+            "session": "={{ $json.catat.session }}",
+            "command": "={{ $json.catat.command }}",
+            "level": "={{ $json.catat.level }}",
+            "tahap": "={{ $json.catat.tahap }}",
+            "host": "={{ $json.catat.host }}",
+            "reply": "={{ $json.catat.reply }}",
+            "ua": "={{ $json.catat.ua }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "ts",
+              "displayName": "ts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "waktu",
+              "displayName": "waktu",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "session",
+              "displayName": "session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "command",
+              "displayName": "command",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "level",
+              "displayName": "level",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "tahap",
+              "displayName": "tahap",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "host",
+              "displayName": "host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "reply",
+              "displayName": "reply",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ua",
+              "displayName": "ua",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2064,
+        0
+      ],
+      "id": "103f9f29-e3aa-43d6-b875-0d067f4a914c",
+      "name": "Catat Log"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "76b8c82f-746c-415d-9297-e4d6e40858aa",
+              "leftValue": "={{ $json.perlu_llm }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        896,
+        0
+      ],
+      "id": "ddeb50a1-36a6-4c17-b7c3-df9ac54bdad0",
+      "name": "perlu llm?"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "cRik7Ds9pf6PSXNY",
+          "mode": "list",
+          "cachedResultName": "indrajala log",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/cRik7Ds9pf6PSXNY"
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        160,
+        208
+      ],
+      "id": "6036149c-05bb-4780-b109-f5bb4aa83dfa",
+      "name": "Ambil Log",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "JbrbtFqf4t1zB8aq",
+          "mode": "list",
+          "cachedResultName": "indrajala canary",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/JbrbtFqf4t1zB8aq"
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        208
+      ],
+      "id": "3afc2368-5a07-4521-803d-557d20bbc65d",
+      "name": "Ambil Canary",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "Pr0dQ1NLFZ786CXn",
+          "mode": "list",
+          "cachedResultName": "indrajala unduhan",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/Pr0dQ1NLFZ786CXn"
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        608,
+        208
+      ],
+      "id": "263888df-2b5a-4375-b76e-5ea1273e2d41",
+      "name": "Ambil Unduhan",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "cRik7Ds9pf6PSXNY",
+          "mode": "list",
+          "cachedResultName": "indrajala log",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/cRik7Ds9pf6PSXNY"
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        160,
+        368
+      ],
+      "id": "ece0dcec-ab50-4fb2-9060-b499f3a13053",
+      "name": "Ambil Log Analisis",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "JbrbtFqf4t1zB8aq",
+          "mode": "list",
+          "cachedResultName": "indrajala canary",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/JbrbtFqf4t1zB8aq"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ts": "={{ $json.catat.ts }}",
+            "token": "={{ $json.catat.token }}",
+            "ua": "={{ $json.catat.ua }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "ts",
+              "displayName": "ts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "token",
+              "displayName": "token",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ua",
+              "displayName": "ua",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        624
+      ],
+      "id": "6b255b74-6347-4c0a-992e-33622720a86e",
+      "name": "Simpan Canary",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "Pr0dQ1NLFZ786CXn",
+          "mode": "list",
+          "cachedResultName": "indrajala unduhan",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/Pr0dQ1NLFZ786CXn"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ts": "={{ $json.catat.ts }}",
+            "kode": "={{ $json.catat.kode }}",
+            "session": "={{ $json.catat.session }}",
+            "file": "={{ $json.catat.file }}",
+            "ua": "={{ $json.catat.ua }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "ts",
+              "displayName": "ts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "kode",
+              "displayName": "kode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "session",
+              "displayName": "session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "file",
+              "displayName": "file",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ua",
+              "displayName": "ua",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        368,
+        976
+      ],
+      "id": "02073c9f-ba6d-4dc8-940c-df0e94fae3d7",
+      "name": "Catat Unduhan",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Halaman daftar berkas palsu (\"Portal Berkas Internal\").\nconst q = $input.first().json.query || {};\nconst sesi = String(q.s || '').replace(/[^\\w\\-.]/g, '').slice(0, 60);\n\nconst esc = (s) => String(s ?? '')\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\n\n// Daftar berkas yang tampil di portal. Nama harus sama dengan DAFTAR di kotak \"Siapkan Unduhan\".\nconst BERKAS = [\n  { nama: 'Rekap_Belanja_TI_Q3_2026.pdf', ukuran: '6 KB', tanggal: '12 Okt 2026', ket: 'Rekapitulasi belanja infrastruktur TI triwulan III' }\n];\n\nconst baris = BERKAS.map((b) => `\n<tr>\n  <td>${esc(b.nama)}</td>\n  <td>${esc(b.ket)}</td>\n  <td>${esc(b.ukuran)}</td>\n  <td>${esc(b.tanggal)}</td>\n  <td><a class=\"tombol\" href=\"/portal/unduh?f=${encodeURIComponent(b.nama)}&amp;s=${encodeURIComponent(sesi)}\">Unduh</a></td>\n</tr>`).join('');\n\nconst html = `<!DOCTYPE html>\n<html lang=\"id\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Portal Berkas Internal</title>\n<style>\nbody{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f4f6f9;color:#1d2733}\n.bar{background:#1f3a5f;color:#fff;padding:14px 28px;font-size:18px;font-weight:600}\n.bar span{font-weight:400;font-size:13px;opacity:.8;margin-left:12px}\n.isi{max-width:900px;margin:28px auto;padding:0 20px}\nh1{font-size:20px;margin:0 0 4px}\n.ket{color:#5b6b7c;margin:0 0 18px;font-size:14px}\ntable{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d7dee6;border-radius:6px;overflow:hidden}\nth,td{padding:11px 14px;text-align:left;font-size:14px;border-bottom:1px solid #e6ebf0}\nth{background:#eef2f7;font-weight:600}\n.tombol{background:#1a56db;color:#fff;text-decoration:none;padding:5px 14px;border-radius:4px;font-size:13px}\n.kaki{margin-top:24px;color:#8493a3;font-size:12px}\n</style></head><body>\n<div class=\"bar\">Portal Berkas Internal<span>Unit Layanan Teknologi Informasi</span></div>\n<div class=\"isi\">\n<h1>Dokumen Bersama</h1>\n<p class=\"ket\">Akses terbatas untuk pegawai unit. Gunakan jaringan internal.</p>\n<table>\n<tr><th>Nama berkas</th><th>Keterangan</th><th>Ukuran</th><th>Diperbarui</th><th></th></tr>\n${baris}\n</table>\n<div class=\"kaki\">Portal Berkas Internal &middot; versi 2.4</div>\n</div></body></html>`;\n\nreturn [{ json: { html } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        768
+      ],
+      "id": "c3f113e0-5d30-417b-9af1-2212e1a64495",
+      "name": "Susun Portal"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "indrajala-web",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        -64,
+        1152
+      ],
+      "id": "615c3186-db4e-4dc5-b807-bed4e032bd29",
+      "name": "Webhook Web",
+      "webhookId": "8f174994-3542-47dc-98be-7eebad02dffb"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Zona Hijau: menilai peristiwa dari website dummy (Zona Kuning) dan menentukan respons yang HARUS ditampilkan.\n// Semua keputusan di sini deterministik (tanpa AI), supaya cepat dan tidak bisa dibujuk.\nconst b = $input.first().json.body || {};\nconst str = (v, n) => String(v ?? '').slice(0, n);\nconst tipe = ['login', 'honeylink', 'url', 'scanner'].includes(b.tipe) ? b.tipe : 'url';\nconst ip = str(b.ip, 45).replace(/[^0-9a-fA-F:.]/g, '') || '0.0.0.0';\nconst ua = str(b.ua, 120);\nconst dec = (t) => { try { return decodeURIComponent(String(t).replace(/\\+/g, ' ')); } catch { return String(t); } };\nconst path = dec(str(b.path, 200));\nconst query = dec(str(b.query, 300));\nconst user = str((b.data || {}).username, 200);\nconst pass = str((b.data || {}).password, 200);\n\n// ---- pengenal sesi: satu per IP ----\nconst session = 'web-' + ip.replace(/[^0-9a-fA-F]/g, '-');\n\n// ---- kredensial umpan (sama dengan config.php.bak di website dan tabel berkas) ----\nconst BAIT_USER = 'webapp';\nconst BAIT_PASS = 'Wb!7qLm2Xp';\n\n// ---- pendeteksi pola SQL injection ----\nfunction analisis(teks) {\n  const t = String(teks);\n  const r = { tautologi: false, kondisi: null, orderBy: null, union: false, sleep: null, galat: false, stacked: false, kutip: /['\"]/.test(t), info: false };\n  // penutup kutip di sisi kanan boleh tidak ada (payload memakai kutip penutup milik kueri asli)\n  const taut = t.match(/['\"]\\s*\\)*\\s*(?:or|\\|\\|)\\s*\\(*\\s*(['\"]?)(\\w+)\\1\\s*(?:=|like)\\s*['\"]?(\\w+)/i);\n  if (taut) { r.tautologi = true; r.kondisi = taut[2] === taut[3]; }\n  if (/['\"]\\s*or\\s+true\\b/i.test(t) || /^[\\w@.\\-]*['\"]\\s*(--|#|\\/\\*)/.test(t)) r.tautologi = true;\n  const bl = t.match(/\\b(?:and|&&)\\s+(['\"]?)(\\w+)\\1\\s*=\\s*(['\"]?)(\\w+)\\3/i);\n  if (bl && !r.tautologi) r.kondisi = bl[2] === bl[4];\n  const ob = t.match(/order\\s+by\\s+(\\d+)/i);\n  if (ob) r.orderBy = Number(ob[1]);\n  r.union = /union(\\s+all)?\\s+select/i.test(t);\n  const sl = t.match(/sleep\\s*\\(\\s*(\\d+)|pg_sleep\\s*\\(\\s*(\\d+)|waitfor\\s+delay\\s+'0:0:(\\d+)/i);\n  if (sl) r.sleep = Number(sl[1] || sl[2] || sl[3]);\n  else if (/benchmark\\s*\\(/i.test(t)) r.sleep = 3;\n  r.galat = /extractvalue|updatexml|floor\\s*\\(\\s*rand|exp\\s*\\(\\s*~/i.test(t);\n  r.stacked = /;\\s*(drop|insert|update|delete|select|create|alter|exec)\\b/i.test(t);\n  r.info = /information_schema|@@version|version\\s*\\(\\s*\\)|database\\s*\\(\\s*\\)|\\buser\\s*\\(\\s*\\)/i.test(t);\n  r.sqli = r.tautologi || r.union || r.sleep !== null || r.galat || r.stacked || r.orderBy !== null || r.kondisi !== null || r.info || r.kutip;\n  return r;\n}\n\nconst gabung = user + ' ' + pass;\nconst sq = tipe === 'login' ? analisis(gabung) : analisis(path + ' ' + query);\nconst sqliKeras = sq.sqli && (sq.tautologi || sq.union || sq.sleep !== null || sq.galat || sq.stacked || sq.orderBy !== null || sq.kondisi !== null || sq.info || sq.kutip);\n\n// ---- tentukan respons ----\nlet aksi = 'tampil', pesan = '', kode = '', tunda_ms = 0, jenis = tipe;\n\nif (tipe === 'login') {\n  const kueri = \"SELECT id, nama, peran FROM pegawai WHERE username='\" + user + \"' AND password=MD5('\" + pass + \"') LIMIT 1\";\n  const posisi = (() => {\n    const iu = user.indexOf(\"'\"), ip2 = pass.indexOf(\"'\");\n    if (iu >= 0) return kueri.indexOf(\"username='\") + 10 + iu;\n    if (ip2 >= 0) return kueri.indexOf(\"MD5('\") + 5 + ip2;\n    return 0;\n  })();\n  const dekat = kueri.slice(posisi).slice(0, 70);\n\n  if (user === BAIT_USER && pass === BAIT_PASS) {\n    aksi = 'sukses'; jenis = 'kredensial-umpan';\n  } else if (sq.tautologi && sq.kondisi !== false) {\n    aksi = 'sukses'; jenis = 'sqli-tautologi';\n  } else if (sq.sleep !== null) {\n    aksi = 'gagal'; pesan = 'Username atau password salah.'; tunda_ms = Math.min(sq.sleep * 1000, 8000); jenis = 'sqli-waktu';\n  } else if (sq.orderBy !== null) {\n    jenis = 'sqli-order-by';\n    if (sq.orderBy > 5) { aksi = 'error_sql'; kode = '1054'; pesan = `Unknown column '${sq.orderBy}' in 'order clause'`; }\n    else { aksi = 'gagal'; pesan = 'Username atau password salah.'; }\n  } else if (sq.union) {\n    aksi = 'error_sql'; kode = '1222'; pesan = 'The used SELECT statements have a different number of columns'; jenis = 'sqli-union';\n  } else if (sq.galat) {\n    aksi = 'error_sql'; kode = '1105'; pesan = \"XPATH syntax error: '~8.0.35-0ubuntu0.22.04.1'\"; jenis = 'sqli-galat';\n  } else if (sq.kondisi !== null) {\n    aksi = 'gagal'; pesan = sq.kondisi ? 'Password salah.' : 'Pengguna tidak ditemukan.'; jenis = 'sqli-buta';\n  } else if (sq.stacked || sq.kutip || sq.info) {\n    aksi = 'error_sql'; kode = '1064';\n    pesan = `You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '${dekat}' at line 1`;\n    jenis = sq.stacked ? 'sqli-bertumpuk' : 'sqli-kutip';\n  } else {\n    aksi = 'gagal'; pesan = 'Username atau password salah.'; jenis = 'login';\n  }\n}\n\n// ---- baris catatan untuk tabel indrajala_log ----\nconst sqliTerdeteksi = jenis.startsWith('sqli') || (tipe !== 'login' && sqliKeras && (sq.tautologi || sq.union || sq.sleep !== null || sq.galat || sq.stacked || sq.orderBy !== null || sq.info));\nlet command, level;\nif (tipe === 'login') {\n  command = `[${jenis.startsWith('sqli') ? 'sqli' : 'login'}] user=\"${user}\" pass=\"${pass}\"`;\n  level = jenis.startsWith('sqli') || jenis === 'kredensial-umpan' ? 'tinggi' : 'sedang';\n} else if (tipe === 'honeylink') {\n  command = `[honeylink] ${path}${query ? '?' + query : ''}`; level = 'tinggi';\n} else if (tipe === 'scanner') {\n  command = `[pemindai] ${ua} ${path}`; level = 'tinggi';\n} else {\n  command = `[${sqliTerdeteksi ? 'sqli' : 'url'}] ${path}${query ? '?' + query : ''}`; level = sqliTerdeteksi ? 'tinggi' : 'sedang';\n}\n\nconst catat = {\n  ts: Date.now(),\n  waktu: new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }),\n  session,\n  command: command.slice(0, 500),\n  level,\n  tahap: 0,\n  host: 'web',\n  reply: `${jenis}; aksi=${aksi}`.slice(0, 200),\n  ua: (`IP ${ip} | ${ua || '-'}`).slice(0, 160)\n};\n\nreturn [{ json: { respons: { aksi, pesan, kode, tunda_ms }, catat, session } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        1152
+      ],
+      "id": "6a1e44f1-cce8-4066-be59-943c5c4d325f",
+      "name": "Nilai Peristiwa Web"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "cRik7Ds9pf6PSXNY",
+          "mode": "list",
+          "cachedResultName": "indrajala log",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/cRik7Ds9pf6PSXNY"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ts": "={{ $json.catat.ts }}",
+            "waktu": "={{ $json.catat.waktu }}",
+            "session": "={{ $json.catat.session }}",
+            "command": "={{ $json.catat.command }}",
+            "level": "={{ $json.catat.level }}",
+            "tahap": "={{ $json.catat.tahap }}",
+            "host": "={{ $json.catat.host }}",
+            "reply": "={{ $json.catat.reply }}",
+            "ua": "={{ $json.catat.ua }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "ts",
+              "displayName": "ts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "waktu",
+              "displayName": "waktu",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "session",
+              "displayName": "session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "command",
+              "displayName": "command",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "level",
+              "displayName": "level",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "tahap",
+              "displayName": "tahap",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "host",
+              "displayName": "host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "reply",
+              "displayName": "reply",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ua",
+              "displayName": "ua",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        1152
+      ],
+      "id": "f0ad791f-8614-449a-b77e-93bedbcdf8c6",
+      "name": "Catat Log Web",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $('Nilai Peristiwa Web').first().json.respons }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        608,
+        1152
+      ],
+      "id": "4ac9d02a-d4cb-4c7d-afa0-d6af40f473a9",
+      "name": "Respond to Webhook5"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "l1IqhCqGGhAmrRQC",
+          "mode": "list",
+          "cachedResultName": "indrajala state",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/l1IqhCqGGhAmrRQC"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        208,
+        -16
+      ],
+      "id": "cda4a5c2-51f4-4122-99af-667aa647d6f4",
+      "name": "Ambil State",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "l1IqhCqGGhAmrRQC",
+          "mode": "list",
+          "cachedResultName": "indrajala state",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/l1IqhCqGGhAmrRQC"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "session",
+              "keyValue": "_hermes"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "session": "={{ $json.hermesBaru.session }}",
+            "versi": "={{ $json.hermesBaru.versi }}",
+            "data": "={{ $json.hermesBaru.data }}",
+            "updated": "={{ $json.hermesBaru.updated }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "session",
+              "displayName": "session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "versi",
+              "displayName": "versi",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated",
+              "displayName": "updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "1fa1aa0a-df12-470b-aa40-8d4ac368a8f3",
+      "name": "Tandai Hermes Sibuk",
+      "executeOnce": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "l1IqhCqGGhAmrRQC",
+          "mode": "list",
+          "cachedResultName": "indrajala state",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/l1IqhCqGGhAmrRQC"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "session",
+              "keyValue": "={{ $('Simpan Memori').first().json.stateBaru.session }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "session": "={{ $('Simpan Memori').first().json.stateBaru.session }}",
+            "versi": "={{ $('Simpan Memori').first().json.stateBaru.versi }}",
+            "data": "={{ $('Simpan Memori').first().json.stateBaru.data }}",
+            "updated": "={{ $('Simpan Memori').first().json.stateBaru.updated }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "session",
+              "displayName": "session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "versi",
+              "displayName": "versi",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "data",
+              "displayName": "data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated",
+              "displayName": "updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2272,
+        0
+      ],
+      "id": "11133601-db93-4b28-873c-04f3e4486f5c",
+      "name": "Simpan State",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Simpan Memori",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Siapkan Memori": {
+      "main": [
+        [
+          {
+            "node": "perlu llm?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simpan Memori": {
+      "main": [
+        [
+          {
+            "node": "Perlu Catat?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Ambil State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Dashboard": {
+      "main": [
+        [
+          {
+            "node": "Ambil Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buat Dashboard": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Analisis": {
+      "main": [
+        [
+          {
+            "node": "Ambil Log Analisis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Siapkan Analisis": {
+      "main": [
+        [
+          {
+            "node": "Analis Hermes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analis Hermes": {
+      "main": [
+        [
+          {
+            "node": "Render Analisis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Analisis": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Canary": {
+      "main": [
+        [
+          {
+            "node": "Catat Canary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Catat Canary": {
+      "main": [
+        [
+          {
+            "node": "Simpan Canary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond to Webhook2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Profil": {
+      "main": [
+        [
+          {
+            "node": "Ambil Berkas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Berkas": {
+      "main": [
+        [
+          {
+            "node": "Ambil Proses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Proses": {
+      "main": [
+        [
+          {
+            "node": "Ambil Jawaban",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Jawaban": {
+      "main": [
+        [
+          {
+            "node": "Siapkan Memori",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Unduh": {
+      "main": [
+        [
+          {
+            "node": "Siapkan Unduhan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Siapkan Unduhan": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Catat Unduhan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Portal": {
+      "main": [
+        [
+          {
+            "node": "Susun Portal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Perlu Catat?": {
+      "main": [
+        [
+          {
+            "node": "Catat Log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Simpan State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Catat Log": {
+      "main": [
+        [
+          {
+            "node": "Simpan State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "perlu llm?": {
+      "main": [
+        [
+          {
+            "node": "Tandai Hermes Sibuk",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Simpan Memori",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Log": {
+      "main": [
+        [
+          {
+            "node": "Ambil Canary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Canary": {
+      "main": [
+        [
+          {
+            "node": "Ambil Unduhan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Unduhan": {
+      "main": [
+        [
+          {
+            "node": "Buat Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil Log Analisis": {
+      "main": [
+        [
+          {
+            "node": "Siapkan Analisis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simpan Canary": {
+      "main": [
+        []
+      ]
+    },
+    "Catat Unduhan": {
+      "main": [
+        []
+      ]
+    },
+    "Susun Portal": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Web": {
+      "main": [
+        [
+          {
+            "node": "Nilai Peristiwa Web",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nilai Peristiwa Web": {
+      "main": [
+        [
+          {
+            "node": "Catat Log Web",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Catat Log Web": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ambil State": {
+      "main": [
+        [
+          {
+            "node": "Ambil Profil",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tandai Hermes Sibuk": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simpan State": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "edc8e962-1278-4099-9940-b024a050b9ee",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "fb3ebfed496786c820498ca19ce4cc3e7bc47a933379cba4aa934100bc6dbc51"
+  },
+  "nodeGroups": [],
+  "id": "IkdJEjLs5PbPsjWc",
+  "tags": []
+}

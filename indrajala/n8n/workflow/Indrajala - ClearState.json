@@ -1,0 +1,80 @@
+{
+  "name": "Indrajala - ClearState",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "b7c5428d-b41d-40bb-ae45-9053aa064486",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "value": "l1IqhCqGGhAmrRQC",
+          "mode": "list",
+          "cachedResultName": "indrajala state",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/l1IqhCqGGhAmrRQC"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "updated",
+              "condition": "lt",
+              "keyValue": "={{ Date.now() - 21600000 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        0
+      ],
+      "id": "d5e2faa3-4b91-4ec2-a1d3-91d65b93805b",
+      "name": "Delete row(s)"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Delete row(s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "495e236e-f2dd-4bd7-9a0e-08ad8089976f",
+  "meta": {
+    "instanceId": "fb3ebfed496786c820498ca19ce4cc3e7bc47a933379cba4aa934100bc6dbc51"
+  },
+  "nodeGroups": [],
+  "id": "utEwPhuXPoAYJLkw",
+  "tags": []
+}

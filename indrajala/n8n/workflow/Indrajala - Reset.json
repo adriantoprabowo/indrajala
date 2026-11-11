@@ -1,0 +1,187 @@
+{
+  "name": "Indrajala - Reset",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        -64
+      ],
+      "id": "fe9fee9f-e894-41b1-8a92-f8d678ab2cf9",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "value": "cRik7Ds9pf6PSXNY",
+          "mode": "list",
+          "cachedResultName": "indrajala log",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/cRik7Ds9pf6PSXNY"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "session",
+              "condition": "neq",
+              "keyValue": "_seed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        192,
+        -176
+      ],
+      "id": "01404663-2dde-4de6-8084-50208e270589",
+      "name": "indrajala_log"
+    },
+    {
+      "parameters": {
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "value": "Pr0dQ1NLFZ786CXn",
+          "mode": "list",
+          "cachedResultName": "indrajala unduhan",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/Pr0dQ1NLFZ786CXn"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "session",
+              "condition": "neq",
+              "keyValue": "_seed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        192,
+        -48
+      ],
+      "id": "d3ab038c-7f69-4251-9cbf-3d1e577b97af",
+      "name": "indrajala_unduhan"
+    },
+    {
+      "parameters": {
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "value": "JbrbtFqf4t1zB8aq",
+          "mode": "list",
+          "cachedResultName": "indrajala canary",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/JbrbtFqf4t1zB8aq"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "token",
+              "condition": "neq",
+              "keyValue": "-"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        192,
+        80
+      ],
+      "id": "0b0514ab-afd7-44e4-bb1c-0356dda4051b",
+      "name": "indrajala_canary"
+    },
+    {
+      "parameters": {
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "value": "l1IqhCqGGhAmrRQC",
+          "mode": "list",
+          "cachedResultName": "indrajala state",
+          "cachedResultUrl": "/projects/3oVMLn5ddPXenePM/datatables/l1IqhCqGGhAmrRQC"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "session",
+              "condition": "neq",
+              "keyValue": "_seed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        176,
+        240
+      ],
+      "id": "4993b600-f0ff-44f7-ad1f-76a56ab2170c",
+      "name": "Delete row(s)"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "indrajala_unduhan",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "indrajala_log",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Delete row(s)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "indrajala_canary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "indrajala_unduhan": {
+      "main": [
+        []
+      ]
+    },
+    "Delete row(s)": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "1c3c9221-9d9b-42d8-9ece-4cfa7c132f47",
+  "meta": {
+    "instanceId": "fb3ebfed496786c820498ca19ce4cc3e7bc47a933379cba4aa934100bc6dbc51"
+  },
+  "nodeGroups": [],
+  "id": "2dF3My3VrxDZxOry",
+  "tags": []
+}
