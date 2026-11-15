@@ -6,9 +6,9 @@ Purwarupa honeypot defensif untuk Cyber Range, dibuat untuk **Kartika Cyber Hack
 
 | | |
 |---|---|
-| Video presentasi | **[URL video]** |
-| Slide penjelasan | **[URL slide]** |
-| Tim / peserta | **[Nama tim] / [Nama peserta]** |
+| Video presentasi | https://youtu.be/7Iduh0k1OuI?si=A1abP-OhMOSv2VwX |
+| Slide penjelasan | https://canva.link/mvhg6ekzqfsg4zt |
+| peserta | Adrianto Prabowo |
 
 > Seluruh entitas, alamat IP, kredensial, dan data di repositori ini **fiktif**. Tidak ada malware, dan tidak ada sistem nyata yang disentuh. Lihat [Keamanan dan etika](#keamanan-dan-etika).
 
