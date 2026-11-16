@@ -30,4 +30,4 @@
 
 ## Penggunaan yang bertanggung jawab
 
-Pasang di jaringan terpisah, jangan hubungkan ke sistem produksi, dan dapatkan izin pemilik jaringan. Untuk penerapan di lingkungan satuan, lakukan uji tim merah dan ikuti prosedur dan perizinan resmi.
+Pasang di jaringan terpisah, jangan hubungkan ke sistem produksi, dan dapatkan izin pemilik jaringan. Untuk penerapan di lingkungan satuan, lakukan uji red team dan ikuti prosedur dan perizinan resmi.
