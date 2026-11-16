@@ -139,4 +139,4 @@ npm test        # butuh Node.js >= 18, tanpa dependensi lain
 
 ## Lisensi
 
-[MIT](LICENSE) © 2026 [Nama peserta]
+[MIT](LICENSE) © 2026 Adrianto Prabowo
