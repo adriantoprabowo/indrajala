@@ -36,6 +36,3 @@ curl -X POST http://localhost:8080/api/terminal -H "Content-Type: application/js
 - **Perangkat kedua tak bisa terhubung:** pakai `localhost` (IP akan tampil `::1`) dan jelaskan bahwa di jaringan nyata IP perangkat penyusup yang tampil.
 - **Cadangan:** siapkan rekaman layar demo ini sebagai video cadangan.
 
-## Merekam video
-
-Gunakan OBS Studio (gratis) atau Xbox Game Bar (Windows + G). Rekam layar penuh dengan suara, resolusi 1080p, dan unggah ke YouTube (tidak publik, "unlisted") atau Google Drive dengan akses "siapa saja yang memiliki tautan". Uji tautan di jendela penyamaran (incognito).
